@@ -65,5 +65,5 @@ if __name__ == "__main__":
         host=settings.APP_HOST,
         port=settings.APP_PORT,
         log_config=log_config,
-        log_level=level_name,
+        log_level=level_name.lower(),
     )

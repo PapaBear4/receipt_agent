@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receipt Agent — Upload</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .card { border: 1px solid #ddd; padding: 1.5rem; border-radius: 8px; max-width: 640px; }
+    input[type="file"] { margin: 1rem 0; }
+    .actions { margin-top: 1rem; }
+    .note { color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Receipt Agent</h1>
+  <div class="card">
+    <form action="/upload" method="post" enctype="multipart/form-data">
+      <label for="file">Upload a receipt (JPG/PNG):</label><br />
+      <input id="file" name="file" type="file" accept="image/jpeg,image/png" required />
+      <div class="actions">
+        <button type="submit">Upload & Extract</button>
+        <a href="/download/csv" style="margin-left: 1rem">Download CSV</a>
+      </div>
+      <p class="note">Images will be stored locally. CSV is appended on save.</p>
+    </form>
+  </div>
+</body>
+</html>

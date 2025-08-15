@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receipt Agent — Review</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
+    img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 6px; }
+    textarea { width: 100%; height: 300px; }
+    .field { margin-bottom: 0.75rem; }
+    label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+    input[type="text"], input[type="number"] { width: 100%; padding: 0.5rem; }
+    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; }
+    .errors { background: #fee; border: 1px solid #f99; color: #900; padding: 0.75rem; margin-bottom: 1rem; }
+    .actions { margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Review & Edit</h1>
+  {% if errors %}
+  <div class="errors">
+    <ul>
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <div class="grid">
+    <div class="card">
+  <h3>Image</h3>
+  <img src="{{ image_url }}" alt="Uploaded receipt" />
+  {% if annotated_url %}
+  <h3>Annotated</h3>
+  <img src="{{ annotated_url }}" alt="Annotated overlay" />
+      <p class="note">Legend: <span style="color:#ff6600">date</span>, <span style="color:#00aa00">payee</span>, <span style="color:#cc0000">total</span></p>
+  {% endif %}
+      <h3>Raw OCR Text</h3>
+      <textarea readonly>{{ raw_text }}</textarea>
+      {% if ocr_lines and assoc %}
+      <h3>Matched Lines</h3>
+      <ul>
+        <li>Date → {{ assoc.date if assoc.date else 'n/a' }}</li>
+        <li>Payee → {{ assoc.payee if assoc.payee else 'n/a' }}</li>
+        <li>Total → {{ assoc.total if assoc.total else 'n/a' }}</li>
+      </ul>
+      {% endif %}
+    </div>
+    <div class="card">
+      <form action="/save" method="post">
+        <input type="hidden" name="stored_filename" value="{{ stored_filename }}" />
+        <input type="hidden" name="original_filename" value="{{ original_filename }}" />
+        <div class="field">
+          <label for="date">Date (MM/DD/YYYY)</label>
+          <input id="date" name="date" type="text" value="{{ date }}" required />
+        </div>
+        <div class="field">
+          <label for="payee">Payee</label>
+          <input id="payee" name="payee" type="text" value="{{ payee }}" required />
+        </div>
+        <div class="field">
+          <label for="outflow">Outflow</label>
+          <input id="outflow" name="outflow" type="text" value="{{ outflow }}" required />
+        </div>
+        <div class="field">
+          <label for="memo">Memo</label>
+          <input id="memo" name="memo" type="text" value="{{ memo }}" required />
+        </div>
+        <div class="actions">
+          <button type="submit">Save</button>
+          <a href="/">Cancel</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

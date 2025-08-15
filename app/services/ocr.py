@@ -1,11 +1,25 @@
 from typing import Tuple, Dict, Any, List
 from PIL import Image
 import pytesseract
-import cv2
+import importlib
 import numpy as np
 
 from app.config import settings
 import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
+if settings.DEBUG:
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.setLevel(logging.INFO)
+
+# Optional dependency import for OpenCV with clear error message
+try:
+    cv2 = importlib.import_module("cv2")
+except Exception as e:  # pragma: no cover - import resolution at runtime
+    cv2 = None  # type: ignore[assignment]
+    logger.debug("cv2 import failed at import time: %s", e)
 
 
 def _preprocess_for_ocr(image_path: str) -> np.ndarray:
@@ -16,7 +30,9 @@ def _preprocess_for_ocr(image_path: str) -> np.ndarray:
     - Morphological opening to remove small artifacts
     """
     if settings.DEBUG:
-        logging.info("OCR preprocess start: %s", image_path)
+        logger.info("OCR preprocess start: %s", image_path)
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required for OCR preprocessing but is not installed.")
     img = cv2.imread(image_path)
     if img is None:
         raise RuntimeError("Failed to read image for OCR")
@@ -33,7 +49,7 @@ def _preprocess_for_ocr(image_path: str) -> np.ndarray:
     kernel = np.ones((2, 2), np.uint8)
     opened = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
     if settings.DEBUG:
-        logging.info("OCR preprocess done: shape=%s", opened.shape)
+        logger.info("OCR preprocess done: shape=%s", opened.shape)
     return opened
 
 
@@ -44,10 +60,10 @@ def ocr_image(image_path: str) -> Tuple[str, str]:
     """
     # Use preprocessing but keep PIL interface for compatibility
     if settings.DEBUG:
-        logging.info("OCR detailed start: %s", image_path)
+        logger.info("OCR detailed start: %s", image_path)
     proc = _preprocess_for_ocr(image_path)
     pil = Image.fromarray(proc)
-    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\-/()&'\"#@%+*"  # noqa: E501
+    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&'\"#@%+*"  # noqa: E501
     text = pytesseract.image_to_string(pil, lang=settings.TESSERACT_LANG, config=config)
     return text, text
 
@@ -64,7 +80,7 @@ def ocr_image_detailed(image_path: str) -> Dict[str, Any]:
     """
     proc = _preprocess_for_ocr(image_path)
     pil = Image.fromarray(proc)
-    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\-/()&'\"#@%+*"  # noqa: E501
+    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&'\"#@%+*"  # noqa: E501
     data = pytesseract.image_to_data(pil, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
     words: List[Dict[str, Any]] = []
     lines_map: Dict[tuple, List[int]] = {}
@@ -92,7 +108,7 @@ def ocr_image_detailed(image_path: str) -> Dict[str, Any]:
     text = "\n".join(lines)
     h, w = proc.shape
     if settings.DEBUG:
-        logging.info("OCR detailed words=%d lines=%d size=%sx%s", len(words), len(lines), w, h)
+        logger.info("OCR detailed words=%d lines=%d size=%sx%s", len(words), len(lines), w, h)
     return {
         'text': text,
         'lines': lines,
@@ -110,6 +126,8 @@ def draw_annotated_overlay(image_path: str, words: List[Dict[str, Any]], line_id
     """
     proc = _preprocess_for_ocr(image_path)
     # Convert to BGR for colored drawing
+    if cv2 is None:
+        raise RuntimeError("OpenCV (cv2) is required for drawing overlays but is not installed.")
     canvas = cv2.cvtColor(proc, cv2.COLOR_GRAY2BGR)
     # Build index of words by line id
     words_by_lid: Dict[tuple, List[Dict[str, Any]]] = {}

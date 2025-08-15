@@ -15,6 +15,13 @@ from app.utils.date_utils import normalize_date_to_mmddyyyy
 
 app = FastAPI(title="Receipt Agent MVP")
 
+# Module logger
+logger = logging.getLogger(__name__)
+if settings.DEBUG:
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.setLevel(logging.INFO)
+
 # Static mount for uploaded/processed images for preview
 app.mount("/data", StaticFiles(directory=str(settings.DATA_DIR)), name="data")
 
@@ -25,12 +32,14 @@ csv_writer = CSVWriter(settings.CSV_PATH)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    logger.debug("Render upload page")
     return templates.TemplateResponse("upload.html", {"request": request})
 
 
 @app.get("/health")
 async def health():
     # Basic liveness; optionally could check Ollama port reachability
+    logger.debug("Health check OK")
     return {"status": "ok"}
 
 
@@ -39,20 +48,27 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
     # Save original upload
     filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
     dest_path = settings.UPLOADS_DIR / filename
+    logger.info("Upload received: %s -> %s", file.filename, dest_path)
     with dest_path.open("wb") as f:
         f.write(await file.read())
 
     # OCR (resilient)
     annotated_url = None
     try:
+        logger.info("Starting OCR: %s", dest_path)
         detailed = ocr_image_detailed(str(dest_path))
         raw_text = detailed.get("text", "")
+        logger.info("OCR complete: %d chars, %d lines", len(raw_text or ""), len(detailed.get("lines", [])))
     except Exception:
+        logger.exception("OCR failed for %s", dest_path)
         raw_text = ""
         detailed = None
 
     # LLM extraction (resilient)
+    logger.info("Starting LLM field extraction")
     fields = extract_fields_from_text(raw_text)
+    if settings.DEBUG:
+        logger.debug("LLM fields: keys=%s", list(fields.keys()))
 
     # Defaults for review form
     date_val = normalize_date_to_mmddyyyy(fields.get("date", ""))
@@ -82,15 +98,17 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
         associated_lines["total"] = find_lid(outflow_val)
 
         try:
+            logger.info("Creating overlay for %s", dest_path)
             overlay = draw_annotated_overlay(str(dest_path), detailed["words"], detailed["line_ids"], associated_lines)
             overlay_name = f"overlay_{filename}.jpg"
             overlay_path = settings.PROCESSED_DIR / overlay_name
-            import cv2
+            import importlib
+            cv2 = importlib.import_module("cv2")
             cv2.imwrite(str(overlay_path), overlay)
             annotated_url = f"/data/processed/{overlay_name}"
         except Exception as e:
             if settings.DEBUG:
-                logging.exception("Failed to create overlay: %s", e)
+                logger.exception("Failed to create overlay: %s", e)
             annotated_url = None
 
         if settings.DEBUG:
@@ -102,9 +120,11 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
                 }
                 dbg_path = settings.PROCESSED_DIR / f"debug_{filename}.json"
                 dbg_path.write_text(json.dumps(debug_dump, indent=2))
+                logger.debug("Wrote debug dump: %s", dbg_path)
             except Exception:
-                pass
+                logger.exception("Failed to write debug dump for %s", dest_path)
 
+    logger.info("Rendering review page: image_url=/data/uploads/%s, annotated=%s", filename, bool(annotated_url))
     return templates.TemplateResponse(
         "review.html",
         {
@@ -136,6 +156,7 @@ async def save_receipt(
     memo: str = Form(...),
 ):
     # Validate
+    logger.info("Saving receipt: stored=%s original=%s", stored_filename, original_filename)
     norm_date = normalize_date_to_mmddyyyy(date)
     errors = []
     if not norm_date:
@@ -151,6 +172,7 @@ async def save_receipt(
         errors.append("Outflow must be a number")
 
     if errors:
+        logger.warning("Validation errors: %s", errors)
         # Re-render review with errors
         image_url = f"/data/uploads/{stored_filename}"
         raw_text, _ = ocr_image(str(settings.UPLOADS_DIR / stored_filename))
@@ -172,6 +194,7 @@ async def save_receipt(
 
     # Append to CSV
     csv_writer.append_row([norm_date, payee, "", memo, f"{amount:.2f}", ""])
+    logger.info("Appended to CSV: %s", settings.CSV_PATH)
 
     # Copy to processed
     src = settings.UPLOADS_DIR / stored_filename
@@ -179,14 +202,17 @@ async def save_receipt(
     dst = settings.PROCESSED_DIR / timestamped
     try:
         dst.write_bytes(src.read_bytes())
+        logger.info("Copied to processed: %s", dst)
     except Exception:
-        pass
+        logger.exception("Failed to copy to processed: %s -> %s", src, dst)
 
     # Redirect to upload page (flash messages could be added later)
+    logger.info("Redirecting to upload page")
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/download/csv")
 async def download_csv():
+    logger.info("CSV download requested: %s", settings.CSV_PATH)
     return FileResponse(str(settings.CSV_PATH), media_type="text/csv", filename="ynab_receipts.csv")
 

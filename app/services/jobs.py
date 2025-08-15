@@ -111,7 +111,7 @@ class JobManager:
         raw_text = detailed.get("text", "")
 
         # LLM extraction
-        fields = extract_fields_from_text(raw_text)
+        fields = extract_fields_from_text(raw_text, detailed.get("lines", []))
         used_model = select_model()
 
         # Save overlay
@@ -125,6 +125,7 @@ class JobManager:
             import importlib
             cv2 = importlib.import_module("cv2")
             orig_img = cv2.imread(str(stored_path))
+
             def _wh(img):
                 if img is None:
                     return (-1, -1)
@@ -133,6 +134,7 @@ class JobManager:
                 else:
                     h, w = img.shape[:2]
                 return (w, h)
+
             base_img = proc_image
             if orig_img is not None and _wh(orig_img) == _wh(proc_image):
                 base_img = orig_img

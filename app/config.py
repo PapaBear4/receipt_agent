@@ -67,7 +67,7 @@ class Settings:
     RECEIPT_BAND_TOP: float = float(os.getenv("RECEIPT_BAND_TOP", "0.10"))  # fallback vertical band margin
     # Tesseract word confidence threshold; raise to suppress noisy words, lower to capture more.
     # MVP: be permissive to avoid missing text.
-    RECEIPT_CONF_THRESHOLD: int = int(os.getenv("RECEIPT_CONF_THRESHOLD", "20"))
+    RECEIPT_CONF_THRESHOLD: int = int(os.getenv("RECEIPT_CONF_THRESHOLD", "10"))
 
 
 settings = Settings()

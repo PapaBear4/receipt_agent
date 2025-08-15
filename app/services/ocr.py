@@ -179,8 +179,8 @@ def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], lin
     else:
         canvas = base_img.copy()
     H, W = canvas.shape[:2]
-    thickness_base = max(1, int(round(max(H, W) * 0.0015)))
-    thickness_high = max(2, thickness_base * 2)
+    thickness_base = max(2, int(round(max(H, W) * 0.0025)))
+    thickness_high = max(3, thickness_base * 2)
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.6, min(2.0, max(H, W) / 1200.0))
     text_thickness = max(1, thickness_base)
@@ -194,7 +194,7 @@ def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], lin
             canvas,
             (wd['left'], wd['top']),
             (wd['left'] + wd['width'], wd['top'] + wd['height']),
-            (160, 160, 160),
+            (80, 80, 80),
             thickness_base,
         )
 

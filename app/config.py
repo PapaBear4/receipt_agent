@@ -33,8 +33,7 @@ class Settings:
     # LLM (Ollama)
     OLLAMA_ENDPOINT: str = os.getenv("OLLAMA_ENDPOINT", "http://127.0.0.1:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
-    # Timeout (seconds) for Ollama HTTP calls
-    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "60"))
+    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "600")) # measured in seconds
 
     # Debugging
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}

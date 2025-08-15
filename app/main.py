@@ -270,9 +270,30 @@ async def save_receipt(
             },
         )
 
-    # Append to CSV
-    csv_writer.append_row([norm_date, payee, "", memo, f"{amount:.2f}", ""])
-    logger.info("Appended to CSV: %s", settings.CSV_PATH)
+    # Append to CSV (handle failures and do not proceed if write fails)
+    try:
+        csv_writer.append_row([norm_date, payee, "", memo, f"{amount:.2f}", ""])
+        logger.info("Appended to CSV: %s", settings.CSV_PATH)
+    except Exception as e:
+        logger.exception("CSV write failed for %s: %s", settings.CSV_PATH, e)
+        # Re-render review with error, do not copy to processed
+        image_url = f"/data/uploads/{stored_filename}"
+        raw_text, _ = ocr_image(str(settings.UPLOADS_DIR / stored_filename))
+        return templates.TemplateResponse(
+            "review.html",
+            {
+                "request": request,
+                "errors": ["Failed to write to CSV. Please try again."],
+                "image_url": image_url,
+                "raw_text": raw_text,
+                "date": norm_date,
+                "payee": payee,
+                "outflow": f"{amount:.2f}",
+                "memo": memo,
+                "stored_filename": stored_filename,
+                "original_filename": original_filename,
+            },
+        )
 
     # Copy to processed
     src = settings.UPLOADS_DIR / stored_filename

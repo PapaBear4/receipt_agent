@@ -16,8 +16,10 @@ from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.image_preproc import crop_receipt, make_receipt_preview
 from app.services.llm import extract_fields_from_text, ollama_health, select_model
 from app.services.jobs import job_manager, Job
+from app.services.db import init_db
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
+from app.services.db import insert_receipt
 
 app = FastAPI(title="Receipt Agent MVP")
 
@@ -37,6 +39,13 @@ csv_writer = CSVWriter(settings.CSV_PATH)
 
 # Start background job worker
 job_manager.start()
+
+# Initialize database schema (idempotent)
+try:
+    init_db()
+    logger.info("Database initialized at %s", settings.DB_PATH)
+except Exception as e:
+    logger.exception("Failed to initialize database: %s", e)
 
 
 def _migrate_legacy_overlays() -> None:
@@ -627,6 +636,13 @@ async def save_receipt(
         logger.info("Copied to processed: %s", dst)
     except Exception:
         logger.exception("Failed to copy to processed: %s -> %s", src, dst)
+
+    # Persist to DB (best-effort; does not block redirect)
+    try:
+        rid = insert_receipt(stored_filename, original_filename, norm_date, amount, payee, memo)
+        logger.info("Saved receipt to DB: id=%s stored=%s", rid, stored_filename)
+    except Exception:
+        logger.exception("Failed to save receipt in DB: stored=%s", stored_filename)
 
     # Redirect to upload page (flash messages could be added later)
     logger.info("Redirecting to upload page")

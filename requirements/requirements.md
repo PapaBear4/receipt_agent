@@ -50,10 +50,10 @@ Receipt Sources → Detection/Triggers → Processing Pipeline → Data Extracti
   - Text extraction for PDFs
   - Move processed files to `/Family Assistant/Receipts/Processed`
 
-### 3. Manual Upload Interface (Future)
+### 3. Manual Upload Interface (Implemented in MVP)
 **Trigger**: Direct upload through web interface
-- **Integration**: FastAPI endpoint for file uploads
-- **Frontend**: React component for drag-and-drop uploads
+- **Integration**: FastAPI endpoints for single and batch file uploads (done)
+- **Frontend**: Simple server-rendered UI with Jinja2 templates (done)
 
 ## Data Extraction Requirements
 
@@ -108,13 +108,13 @@ Receipt Sources → Detection/Triggers → Processing Pipeline → Data Extracti
 
 ### Phase 1: Core Receipt Processing (Foundation)
 **Duration**: 1-2 weeks
-- [ ] Create receipt processing tool
-- [ ] Implement OCR pipeline for images
+- [x] Create receipt processing tool
+- [x] Implement OCR pipeline for images
 - [ ] Implement PDF text extraction
-- [ ] Design LLM prompts for data extraction
-- [ ] Create structured output format (JSON schema)
-- [ ] Build validation layer
-- [ ] Add manual testing interface
+- [x] Design LLM prompts for data extraction
+- [x] Create structured output format (JSON schema)
+- [x] Build validation layer (basic form validation and CSV write handling)
+- [x] Add manual testing interface (upload + review UI)
 
 ### Phase 2: Google Drive Integration
 **Duration**: 1 week
@@ -144,8 +144,8 @@ Receipt Sources → Detection/Triggers → Processing Pipeline → Data Extracti
 **Duration**: Ongoing
 - [ ] Machine learning for merchant recognition
 - [ ] Smart categorization based on merchant/items
-- [ ] Duplicate detection and handling
-- [ ] Batch processing capabilities
+- [x] Duplicate detection and handling (upload SHA‑1 dedupe)
+- [x] Batch processing capabilities (batch upload + background jobs)
 - [ ] Reporting and analytics dashboard
 
 ## Data Flow

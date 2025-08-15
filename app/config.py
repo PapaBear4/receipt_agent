@@ -27,6 +27,14 @@ class Settings:
     else:
         CSV_PATH: Path = DATA_DIR / "ynab_receipts.csv"
 
+    # Database path (SQLite)
+    _DB_ENV: str | None = os.getenv("DB_PATH")
+    if _DB_ENV:
+        _db_path = Path(_DB_ENV)
+        DB_PATH: Path = _db_path if _db_path.is_absolute() else DATA_DIR / _db_path
+    else:
+        DB_PATH: Path = DATA_DIR / "receipts.db"
+
     # OCR
     TESSERACT_LANG: str = os.getenv("TESSERACT_LANG", "eng")
 

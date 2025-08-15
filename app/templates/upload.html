@@ -22,7 +22,27 @@
         <button type="submit">Upload & Extract</button>
         <a href="/download/csv" style="margin-left: 1rem">Download CSV</a>
       </div>
-      <p class="note">Images will be stored locally. CSV is appended on save.</p>
+      <p class="note">Single upload. Images are stored locally. CSV is appended on save.</p>
+    </form>
+  </div>
+  <div class="card" style="margin-top: 1rem;">
+    <form action="/upload/batch" method="post" enctype="multipart/form-data">
+      <label for="files">Batch upload (select multiple JPG/PNG):</label><br />
+      <input id="files" name="files" type="file" multiple accept="image/jpeg,image/png" />
+      <div class="actions">
+        <button type="submit">Upload Batch</button>
+  <a href="/jobs" style="margin-left: 1rem">Jobs</a>
+  <a href="/processed" style="margin-left: 1rem">Processed</a>
+      </div>
+      <p class="note">We'll dedupe by file content. You can review each receipt after upload.</p>
+    </form>
+  </div>
+  <div class="card" style="margin-top: 1rem;">
+    <form action="/admin/clear" method="post" onsubmit="return confirm('This will delete uploads, processed artifacts, and reset the CSV. Continue?')">
+      <div class="actions">
+        <button type="submit" style="background:#fee;color:#900;border:1px solid #f99;">Clear All Data</button>
+      </div>
+      <p class="note">Use to wipe test data. Disabled while jobs are running.</p>
     </form>
   </div>
 </body>

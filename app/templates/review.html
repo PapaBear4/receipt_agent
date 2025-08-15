@@ -22,10 +22,18 @@
     @media (min-width: 1200px) {
       .img-grid img { height: 450px; }
     }
+    .toolbar { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0 1rem; }
+    .badge { margin-left: auto; padding: 0.25rem 0.5rem; border-radius: 999px; font-size: 0.85rem; text-decoration: none; }
+    .badge.ok { background: #e7f7ee; color: #0a7a3f; border: 1px solid #bfe7cf; }
+    .key-hint { color: #666; font-size: 0.85rem; }
   </style>
 </head>
 <body>
-  <h1>Review & Edit</h1>
+  <h1 style="display:flex; align-items:center; gap:0.75rem;">Review & Edit
+    {% if used_model %}
+      <a href="/health/llm" target="_blank" title="LLM health and available models" class="badge ok">LLM: {{ used_model }}</a>
+    {% endif %}
+  </h1>
   {% if errors %}
   <div class="errors">
     <ul>
@@ -35,14 +43,24 @@
   {% endif %}
   <div class="grid">
     <div class="card">
+  <div class="toolbar">
+    <div>
+      <button type="button" id="zoomOut" title="[">−</button>
+      <button type="button" id="zoomIn" title="]">+</button>
+      {% if annotated_url %}
+      <label style="margin-left:0.5rem;"><input type="checkbox" id="toggleOverlay" checked /> Show overlay</label>
+      {% endif %}
+    </div>
+    <div class="key-hint">Hotkeys: [ and ] to zoom, o to toggle overlay, Ctrl/⌘+Enter to save</div>
+  </div>
   <div class="img-grid">
     <figure>
-      <img src="{{ image_url }}" alt="Uploaded receipt" />
+      <img id="imgOriginal" src="{{ image_url }}" alt="Uploaded receipt" />
       <figcaption>Original</figcaption>
     </figure>
     {% if annotated_url %}
     <figure>
-      <img src="{{ annotated_url }}" alt="Annotated overlay" />
+      <img id="imgAnnotated" src="{{ annotated_url }}" alt="Annotated overlay" />
       <figcaption>Annotated <span style="margin-left:0.5rem; font-weight:normal;">
         <span style="color:#ff6600">date</span>, <span style="color:#00aa00">payee</span>, <span style="color:#cc0000">total</span>
       </span></figcaption>
@@ -64,7 +82,7 @@
       {% endif %}
     </div>
     <div class="card">
-      <form action="/save" method="post">
+      <form action="/save" method="post" id="reviewForm">
         <input type="hidden" name="stored_filename" value="{{ stored_filename }}" />
         <input type="hidden" name="original_filename" value="{{ original_filename }}" />
         <div class="field">
@@ -90,5 +108,34 @@
       </form>
     </div>
   </div>
+  <script>
+    (function(){
+      const imgOriginal = document.getElementById('imgOriginal');
+      const imgAnnotated = document.getElementById('imgAnnotated');
+      const zoomIn = document.getElementById('zoomIn');
+      const zoomOut = document.getElementById('zoomOut');
+      const toggleOverlay = document.getElementById('toggleOverlay');
+      const form = document.getElementById('reviewForm');
+
+      let scale = 1.0;
+      function applyScale() {
+        const s = `scale(${scale})`;
+        if (imgOriginal) { imgOriginal.style.transform = s; imgOriginal.style.transformOrigin = 'top left'; }
+        if (imgAnnotated) { imgAnnotated.style.transform = s; imgAnnotated.style.transformOrigin = 'top left'; }
+      }
+      function clamp(v, min, max){ return Math.max(min, Math.min(max, v)); }
+      if (zoomIn) zoomIn.addEventListener('click', () => { scale = clamp(scale * 1.15, 0.5, 5); applyScale(); });
+      if (zoomOut) zoomOut.addEventListener('click', () => { scale = clamp(scale / 1.15, 0.5, 5); applyScale(); });
+      if (toggleOverlay && imgAnnotated) toggleOverlay.addEventListener('change', (e) => {
+        imgAnnotated.style.display = e.target.checked ? '' : 'none';
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '[') { scale = clamp(scale / 1.15, 0.5, 5); applyScale(); }
+        else if (e.key === ']') { scale = clamp(scale * 1.15, 0.5, 5); applyScale(); }
+        else if (e.key.toLowerCase() === 'o' && imgAnnotated && toggleOverlay) { toggleOverlay.checked = !toggleOverlay.checked; imgAnnotated.style.display = toggleOverlay.checked ? '' : 'none'; }
+        else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { if (form) form.submit(); }
+      });
+    })();
+  </script>
 </body>
 </html>

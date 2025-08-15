@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jobs</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 900px; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; }
+    th { background: #f7f7f7; text-align: left; }
+    .status-done { color: #0a0; font-weight: 600; }
+    .status-processing { color: #06c; font-weight: 600; }
+    .status-queued { color: #a60; font-weight: 600; }
+    .status-failed { color: #c00; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Background Jobs</h1>
+  <p style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
+    <span><a href="/">← Back to Upload</a> · <a href="/processed">Processed</a></span>
+    <span style="margin-left:auto"></span>
+    <label><input type="checkbox" id="autoRefresh" checked /> Auto-refresh</label>
+  <span id="refreshInfo" class="muted">Refreshing in <span id="refreshCountdown">30</span>s</span>
+    <button type="button" id="refreshNow">Refresh now</button>
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Original</th>
+        <th>Stored</th>
+        <th>Status</th>
+        <th>Error</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for j in jobs %}
+      <tr>
+        <td>{{ j.id }}</td>
+        <td>{{ j.original }}</td>
+        <td>{{ j.stored }}</td>
+        <td class="status-{{ j.status }}">{{ j.status }}</td>
+        <td>{{ j.error }}</td>
+        <td>
+          {% if j.review_url %}
+          <a href="{{ j.review_url }}">Review</a>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <script>
+    (function(){
+      const hasActive = () => !!document.querySelector('.status-queued, .status-processing');
+      const autoCb = document.getElementById('autoRefresh');
+      const info = document.getElementById('refreshInfo');
+      const cd = document.getElementById('refreshCountdown');
+      const btn = document.getElementById('refreshNow');
+      let timer = null;
+      function schedule() {
+        if (!hasActive()) {
+          if (info) info.textContent = 'All jobs complete';
+          return;
+        }
+        if (!autoCb || !autoCb.checked) {
+          if (info) info.textContent = 'Auto-refresh paused';
+          return;
+        }
+        let s = 30;
+        function tick(){
+          if (!autoCb.checked) { if (info) info.textContent = 'Auto-refresh paused'; return; }
+          if (cd) cd.textContent = String(s);
+          if (s <= 0) { location.reload(); return; }
+          s -= 1;
+          timer = setTimeout(tick, 1000);
+        }
+        tick();
+      }
+      if (btn) btn.addEventListener('click', () => location.reload());
+      if (autoCb) autoCb.addEventListener('change', () => { if (timer) clearTimeout(timer); schedule(); });
+      schedule();
+    })();
+  </script>
+</body>
+</html>

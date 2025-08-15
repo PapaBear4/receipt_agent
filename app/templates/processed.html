@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Processed Items</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 0.75rem; }
+    .card img { width: 100%; height: 200px; object-fit: contain; background: #fff; border: 1px solid #eee; border-radius: 6px; }
+    .muted { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Processed</h1>
+  <p><a href="/">← Back to Upload</a> · <a href="/jobs">Jobs</a></p>
+  <div class="grid">
+    {% for it in items %}
+    <div class="card">
+      {% if it.overlay_url %}
+        <img src="{{ it.overlay_url }}" alt="overlay" />
+      {% else %}
+        <div class="muted">No overlay</div>
+      {% endif %}
+      <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+        {% if it.review_url %}<a href="{{ it.review_url }}">Review</a>{% endif %}
+        {% if it.ocr_json_url %}<a href="{{ it.ocr_json_url }}" download>OCR JSON</a>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</body>
+</html>

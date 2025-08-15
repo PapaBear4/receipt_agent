@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Batch Upload Results</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 900px; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; }
+    th { background: #f7f7f7; text-align: left; }
+    .status-saved { color: #0a0; font-weight: 600; }
+    .status-duplicate { color: #a60; font-weight: 600; }
+    .status-error { color: #c00; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Batch Upload Results</h1>
+  <p><a href="/">← Back to Upload</a></p>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Filename</th>
+        <th>Status</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in results %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ r.filename }}</td>
+        <td class="status-{{ r.status }}">{{ r.status }}</td>
+        <td>
+          {% if r.review_url %}
+            <a href="{{ r.review_url }}">Review</a>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

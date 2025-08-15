@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 from PIL import Image
 import pytesseract
 import importlib
@@ -104,64 +104,202 @@ def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
     assert cv2 is not None, "cv2 is required"
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     try:
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=float(settings.OCR_CLAHE_CLIP), tileGridSize=(8, 8))
         gray = clahe.apply(gray)
     except Exception as e:
         logger.debug("CLAHE failed, using plain grayscale: %s", e)
     return gray
 
 
-def ocr_on_cropped_image(img_bgr: np.ndarray) -> Dict[str, Any]:
-    """Run OCR on a given (already cropped) image array.
+def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = None) -> Dict[str, Any]:
+    """Run OCR on a given (already cropped) image array with fallbacks.
 
-    The input should be a BGR image (as from cv2). Coordinates returned
-    are relative to the processed image passed in (no resizing applied).
+    Tries multiple preprocessing variants and PSM modes, then returns the
+    best result by word count. Also returns the processed image used, so
+    overlays align perfectly.
     """
-    pil_source = _light_preprocess_for_tesseract(img_bgr)
-    pil_img = Image.fromarray(pil_source)
-    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&@%+#*"  # noqa: E501
-    data = pytesseract.image_to_data(pil_img, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+    assert cv2 is not None, "cv2 is required"
 
-    words: List[Dict[str, Any]] = []
-    lines_map: Dict[tuple, List[int]] = {}
-    all_lines_text: Dict[tuple, List[str]] = {}
-    for i in range(len(data.get('text', []))):
-        txt = (data['text'][i] or '').strip()
-        if not txt:
-            continue
+    # Raw-only short-circuit: send original image to Tesseract with no preprocessing/resizing
+    if getattr(settings, "OCR_RAW_ONLY", False):
+        # Prepare simple, non-destructive variants
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        inv = cv2.bitwise_not(gray)
+        variants = [("rgb", rgb), ("gray", gray), ("inv", inv)]
+        # Build common config parts from settings
+        oem = int(getattr(settings, "OCR_OEM", 1))
+        whitelist = getattr(settings, "OCR_CHAR_WHITELIST", "") if getattr(settings, "OCR_USE_WHITELIST", True) else ""
+        dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if getattr(settings, "OCR_DISABLE_DICTIONARY", False) else ""
+        spaces_flag = "-c preserve_interword_spaces=1" if getattr(settings, "OCR_PRESERVE_SPACES", True) else ""
+        dpi_flag = f"--dpi {int(getattr(settings, 'OCR_USER_DPI', 300))}"
+
+        def run_raw(img_variant: np.ndarray, psm: int) -> Dict[str, Any]:
+            config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag}"
+            if whitelist:
+                config += f" -c tessedit_char_whitelist={whitelist}"
+            pil_img = Image.fromarray(img_variant)
+            data = pytesseract.image_to_data(pil_img, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+            words: List[Dict[str, Any]] = []
+            lines_map: Dict[tuple, List[int]] = {}
+            all_lines_text: Dict[tuple, List[str]] = {}
+            n = len(data.get('text', []))
+            for i in range(n):
+                txt = (data['text'][i] or '').strip()
+                if not txt:
+                    continue
+                try:
+                    conf = int(data.get('conf', ["-1"])[i])
+                except Exception:
+                    conf = -1
+                if conf < settings.RECEIPT_CONF_THRESHOLD:
+                    continue
+                left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+                block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
+                lid = (block, par, line)
+                words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': lid})
+                lines_map.setdefault(lid, []).append(len(words) - 1)
+                all_lines_text.setdefault(lid, []).append(txt)
+            ordered_lids = sorted(lines_map.keys())
+            lines: List[str] = [" ".join(all_lines_text[lid]) for lid in ordered_lids]
+            text = "\n".join(lines)
+            # Preserve the variant’s size for coordinates
+            if img_variant.ndim == 2:
+                h, w = img_variant.shape
+            else:
+                h, w = img_variant.shape[:2]
+            return {
+                'text': text,
+                'lines': lines,
+                'words': words,
+                'line_ids': ordered_lids,
+                'size': (w, h),
+                'proc_image': img_variant if img_variant.ndim == 3 else cv2.cvtColor(img_variant, cv2.COLOR_GRAY2BGR),
+            }
+
+        best: Optional[Dict[str, Any]] = None
+        psms = [int(p.strip()) for p in str(getattr(settings, 'OCR_PSMS', '6,4,11,3,7')).split(',') if p.strip().isdigit()]
+        for vname, vimg in variants:
+            for psm in psms:
+                res = run_raw(vimg, psm)
+                if settings.DEBUG:
+                    logger.debug("RAW OCR variant=%s psm=%d words=%d", vname, psm, len(res['words']))
+                if best is None or len(res['words']) > len(best['words']):
+                    best = res
+        result = best if best is not None else run_raw(rgb, 6)
+        if settings.DEBUG and debug_basename:
+            try:
+                out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
+                cv2.imwrite(str(out), result['proc_image'])
+                logger.info("Saved OCR input used (raw): %s", out)
+            except Exception as e:
+                logger.debug("Failed to save debug OCR input (raw): %s", e)
+        return result
+
+    def upscale_if_small(img: np.ndarray, target_max: int = 1800) -> np.ndarray:
+        H, W = img.shape[:2]
+        m = max(H, W)
+        if m >= target_max:
+            return img
+        scale = float(target_max) / float(m)
+        return cv2.resize(img, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_CUBIC)
+
+    # Build preprocess variants
+    gray = _light_preprocess_for_tesseract(img_bgr)
+    gray = upscale_if_small(gray)
+    variants = [("gray", gray)]
+    # Optional Variant B: adaptive threshold + opening + optional median blur to reduce speckle
+    if getattr(settings, "OCR_USE_THRESH", True):
         try:
-            conf = int(data.get('conf', ["-1"])[i])
-        except Exception:
-            conf = -1
-        if conf < settings.RECEIPT_CONF_THRESHOLD:
-            continue
-        left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-        block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
-        lid = (block, par, line)
-        words.append({
-            'text': txt,
-            'left': int(left),
-            'top': int(top),
-            'width': int(width),
-            'height': int(height),
-            'line_id': lid,
-        })
-        lines_map.setdefault(lid, []).append(len(words) - 1)
-        all_lines_text.setdefault(lid, []).append(txt)
+            block = int(getattr(settings, "OCR_ADAPTIVE_BLOCK", 31))
+            if block % 2 == 0:
+                block += 1
+            cval = int(getattr(settings, "OCR_ADAPTIVE_C", 10))
+            th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, cval)
+            kernel = np.ones((2, 2), np.uint8)
+            opened = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
+            mblur = int(getattr(settings, "OCR_MEDIAN_BLUR", 3))
+            if mblur >= 3 and (mblur % 2 == 1):
+                opened = cv2.medianBlur(opened, mblur)
+            variants.append(("thresh", opened))
+        except Exception as e:
+            logger.debug("Adaptive threshold failed: %s", e)
+    psms = [6, 4, 11, 7, 3]
 
-    ordered_lids = sorted(lines_map.keys())
-    lines: List[str] = [" ".join(all_lines_text[lid]) for lid in ordered_lids]
-    text = "\n".join(lines)
-    h, w = pil_source.shape
-    if settings.DEBUG:
-        logger.info("OCR(light) words=%d lines=%d size=%sx%s", len(words), len(lines), w, h)
-    return {
-        'text': text,
-        'lines': lines,
-        'words': words,
-        'line_ids': ordered_lids,
-        'size': (w, h),
-    }
+    def run_ocr(img_single: np.ndarray, psm: int) -> Dict[str, Any]:
+        pil_img = Image.fromarray(img_single)
+        config = f"--oem 1 --psm {psm} -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&@%+#*"
+        data = pytesseract.image_to_data(pil_img, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+        words: List[Dict[str, Any]] = []
+        lines_map: Dict[tuple, List[int]] = {}
+        all_lines_text: Dict[tuple, List[str]] = {}
+        n = len(data.get('text', []))
+        for i in range(n):
+            txt = (data['text'][i] or '').strip()
+            if not txt:
+                continue
+            try:
+                conf = int(data.get('conf', ["-1"])[i])
+            except Exception:
+                conf = -1
+            if conf < settings.RECEIPT_CONF_THRESHOLD:
+                continue
+            left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+            block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
+            lid = (block, par, line)
+            words.append({
+                'text': txt,
+                'left': int(left),
+                'top': int(top),
+                'width': int(width),
+                'height': int(height),
+                'line_id': lid,
+            })
+            lines_map.setdefault(lid, []).append(len(words) - 1)
+            all_lines_text.setdefault(lid, []).append(txt)
+        ordered_lids = sorted(lines_map.keys())
+        lines: List[str] = [" ".join(all_lines_text[lid]) for lid in ordered_lids]
+        text = "\n".join(lines)
+        h, w = img_single.shape
+        return {
+            'text': text,
+            'lines': lines,
+            'words': words,
+            'line_ids': ordered_lids,
+            'size': (w, h),
+        }
+
+    best: Optional[Dict[str, Any]] = None
+    best_meta = ("", 0)
+    best_image: Optional[np.ndarray] = None
+    for vname, vimg in variants:
+        for psm in psms:
+            result = run_ocr(vimg, psm)
+            score = len(result['words'])
+            if settings.DEBUG:
+                logger.debug("OCR variant=%s psm=%d words=%d", vname, psm, score)
+            if best is None or score > len(best['words']):
+                best = result
+                best_meta = (vname, psm)
+                best_image = vimg
+
+    if settings.DEBUG and debug_basename and best_image is not None:
+        try:
+            out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
+            cv2.imwrite(str(out), best_image)
+            logger.info("Saved OCR input used: %s (variant=%s, psm=%s)", out, best_meta[0], best_meta[1])
+        except Exception as e:
+            logger.debug("Failed to save debug OCR input: %s", e)
+
+    if best is None:
+        # Fallback to empty result
+        h, w = gray.shape
+        best = {'text': '', 'lines': [], 'words': [], 'line_ids': [], 'size': (w, h)}
+        best_image = gray
+
+    # Attach the image used for downstream overlay
+    best['proc_image'] = best_image if best_image is not None else gray
+    return best
 
 
 def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], line_ids: List[tuple],

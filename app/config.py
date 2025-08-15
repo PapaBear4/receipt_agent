@@ -32,7 +32,9 @@ class Settings:
 
     # LLM (Ollama)
     OLLAMA_ENDPOINT: str = os.getenv("OLLAMA_ENDPOINT", "http://127.0.0.1:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b_q4")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
+    # Timeout (seconds) for Ollama HTTP calls
+    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "60"))
 
     # Debugging
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
@@ -67,7 +69,37 @@ class Settings:
     RECEIPT_BAND_TOP: float = float(os.getenv("RECEIPT_BAND_TOP", "0.10"))  # fallback vertical band margin
     # Tesseract word confidence threshold; raise to suppress noisy words, lower to capture more.
     # MVP: be permissive to avoid missing text.
-    RECEIPT_CONF_THRESHOLD: int = int(os.getenv("RECEIPT_CONF_THRESHOLD", "10"))
+    RECEIPT_CONF_THRESHOLD: int = int(os.getenv("RECEIPT_CONF_THRESHOLD", "0"))
+
+    # OCR preprocessing knobs (env overridable)
+    # Toggle whether to try an adaptive-threshold variant (can create speckle on textured paper)
+    OCR_USE_THRESH: bool = os.getenv("OCR_USE_THRESH", "false").lower() in {"1", "true", "yes"}
+    # CLAHE contrast limiter (higher => stronger local contrast; too high can amplify paper grain)
+    OCR_CLAHE_CLIP: float = float(os.getenv("OCR_CLAHE_CLIP", "2.0"))
+    # Adaptive threshold parameters (must be odd block size)
+    OCR_ADAPTIVE_BLOCK: int = int(os.getenv("OCR_ADAPTIVE_BLOCK", "31"))
+    OCR_ADAPTIVE_C: int = int(os.getenv("OCR_ADAPTIVE_C", "10"))
+    # Median blur kernel to remove salt-and-pepper speckle after threshold (odd, 0 to disable)
+    OCR_MEDIAN_BLUR: int = int(os.getenv("OCR_MEDIAN_BLUR", "3"))
+    # Raw-only mode: bypass all preprocessing and feed the original image to Tesseract
+    OCR_RAW_ONLY: bool = os.getenv("OCR_RAW_ONLY", "true").lower() in {"1", "true", "yes"}
+    # OCR engine/options
+    # Comma-separated PSMs to try in order; we pick the result with the most words
+    OCR_PSMS: str = os.getenv("OCR_PSMS", "11,6,4,3,7")
+    # OCR engine mode: 1=LSTM only, 3=default; try 3 if results are too sparse
+    OCR_OEM: int = int(os.getenv("OCR_OEM", "3"))
+    # Whitelist handling: if false or empty, no whitelist constraint is passed
+    OCR_USE_WHITELIST: bool = os.getenv("OCR_USE_WHITELIST", "false").lower() in {"1", "true", "yes"}
+    OCR_CHAR_WHITELIST: str = os.getenv(
+        "OCR_CHAR_WHITELIST",
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&@%+#*",
+    )
+    # Dictionary: disabling can reduce over-correction on receipts
+    OCR_DISABLE_DICTIONARY: bool = os.getenv("OCR_DISABLE_DICTIONARY", "true").lower() in {"1", "true", "yes"}
+    # Preserve spaces: improves layout fidelity in outputs
+    OCR_PRESERVE_SPACES: bool = os.getenv("OCR_PRESERVE_SPACES", "true").lower() in {"1", "true", "yes"}
+    # DPI hint for Tesseract; camera images benefit from a higher user-defined DPI
+    OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "350"))
 
 
 settings = Settings()

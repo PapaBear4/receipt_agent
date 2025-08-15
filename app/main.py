@@ -12,7 +12,7 @@ import json
 from app.services.ocr import ocr_image, ocr_image_detailed, draw_annotated_overlay
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.image_preproc import crop_receipt, make_receipt_preview
-from app.services.llm import extract_fields_from_text
+from app.services.llm import extract_fields_from_text, ollama_health, select_model
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
 
@@ -46,6 +46,29 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/health/llm")
+async def health_llm():
+    info = ollama_health()
+    # Also report the model that would actually be used (with fallback selection)
+    model_value = str(info.get("model", ""))
+    info["used_model"] = select_model(model_value)
+    # Log concise summary
+    logger.info(
+        "LLM health: endpoint_ok=%s model_ok=%s model=%s",
+        info.get("endpoint_ok"),
+        info.get("model_ok"),
+        info.get("model"),
+    )
+    return info
+
+
+@app.get("/health/llm/test")
+async def health_llm_test(q: str = "Walmart 06/09/2025 Total $14.23"):
+    used_model = select_model()
+    fields = extract_fields_from_text(q)
+    return {"model": used_model, "fields": fields}
+
+
 @app.post("/upload")
 async def upload_receipt(request: Request, file: UploadFile = File(...)):
     # Save original upload
@@ -63,7 +86,7 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
         cv2 = importlib.import_module("cv2")
         logger.info("Cropping/warping receipt: %s", dest_path)
         cropped = crop_receipt(str(dest_path))
-    # MVP: we won't show preview yet, but keep the cropped image in memory for OCR
+        # MVP: we won't show preview yet, but keep the cropped image in memory for OCR
         cropped_for_ocr = cropped
     except Exception as e:
         if settings.DEBUG:
@@ -72,6 +95,7 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
 
     # OCR on cropped (or original if crop failed)
     annotated_url = None
+    ocr_json_url = None
     detailed = None
     raw_text = ""
     try:
@@ -81,7 +105,8 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
             logger.info("Crop failed; using original image for OCR")
             cropped_for_ocr = cv2.imread(str(dest_path))
         logger.info("Starting OCR on cropped image")
-        detailed = ocr_on_cropped_image(cropped_for_ocr)
+        debug_base = Path(filename).stem
+        detailed = ocr_on_cropped_image(cropped_for_ocr, debug_basename=debug_base)
         raw_text = detailed.get("text", "")
         logger.info("OCR complete: %d chars, %d lines", len(raw_text or ""), len(detailed.get("lines", [])))
     except Exception:
@@ -127,17 +152,35 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
             highlight_map = {k: v for k, v in associated_lines.items() if v is not None}
             highlight_map = cast(Dict[str, tuple], highlight_map)
             # Draw overlay directly on the cropped image used for OCR to keep coordinates aligned
-            if cropped_for_ocr is None:
+            # Use the exact processed image used by OCR for coordinate alignment
+            proc_image = detailed.get("proc_image")
+            if proc_image is None:
                 import importlib
                 cv2 = importlib.import_module("cv2")
-                cropped_for_ocr = cv2.imread(str(dest_path))
-            overlay = draw_overlay_on_image(cropped_for_ocr, detailed["words"], detailed["line_ids"], highlight_map)
+                proc_image = cropped_for_ocr if cropped_for_ocr is not None else cv2.imread(str(dest_path))
+            overlay = draw_overlay_on_image(proc_image, detailed["words"], detailed["line_ids"], highlight_map)
             overlay_name = f"overlay_{filename}.jpg"
             overlay_path = settings.PROCESSED_DIR / overlay_name
             import importlib
             cv2 = importlib.import_module("cv2")
             cv2.imwrite(str(overlay_path), overlay)
             annotated_url = f"/data/processed/{overlay_name}"
+            # Also dump a JSON file with OCR words/lines/boxes for download
+            try:
+                serial = {
+                    "text": detailed.get("text", ""),
+                    "lines": detailed.get("lines", []),
+                    "words": detailed.get("words", []),
+                    "line_ids": detailed.get("line_ids", []),
+                    "size": list(detailed.get("size", [])) if isinstance(detailed.get("size"), (list, tuple)) else detailed.get("size"),
+                }
+                ocr_json_name = f"ocr_{Path(filename).stem}.json"
+                ocr_json_path = settings.PROCESSED_DIR / ocr_json_name
+                ocr_json_path.write_text(json.dumps(serial, indent=2))
+                ocr_json_url = f"/data/processed/{ocr_json_name}"
+            except Exception as e:
+                if settings.DEBUG:
+                    logger.exception("Failed to write OCR JSON: %s", e)
         except Exception as e:
             if settings.DEBUG:
                 logger.exception("Failed to create overlay: %s", e)
@@ -163,6 +206,7 @@ async def upload_receipt(request: Request, file: UploadFile = File(...)):
             "request": request,
             "image_url": f"/data/uploads/{filename}",
             "annotated_url": annotated_url,
+            "ocr_json_url": ocr_json_url,
             # "preview_url": preview_url,  # hidden in MVP
             "raw_text": raw_text,
             "date": date_val,

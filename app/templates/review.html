@@ -49,6 +49,9 @@
     </figure>
     {% endif %}
   </div>
+  {% if ocr_json_url %}
+  <p><a href="{{ ocr_json_url }}" download>Download OCR JSON</a></p>
+  {% endif %}
       <h3>Raw OCR Text</h3>
       <textarea readonly>{{ raw_text }}</textarea>
       {% if ocr_lines and assoc %}

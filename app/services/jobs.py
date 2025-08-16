@@ -12,6 +12,7 @@ import logging
 from app.config import settings
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.llm import extract_fields_from_text, select_model
+from app.services.db import insert_llm_run
 
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,11 @@ class JobManager:
         # LLM extraction
         fields = extract_fields_from_text(raw_text, detailed.get("lines", []))
         used_model = select_model()
+        try:
+            if fields.get("metrics"):
+                insert_llm_run(job.stored_name, used_model, fields["metrics"])  # type: ignore[arg-type]
+        except Exception:
+            logger.debug("llm_run insert failed for %s", job.stored_name)
 
         # Save overlay
         try:

@@ -81,6 +81,12 @@
         <div>Indexed lines: {{ metrics.prompt.indexed_lines }}</div>
         <div>Full text included: {{ 'yes' if metrics.prompt.include_full_text else 'no' }}</div>
         <div>Limits: chars={{ metrics.prompt.max_chars }}, lines={{ metrics.prompt.max_lines }}</div>
+  {% if metrics.prompt.cleanup %}
+  <div style="margin-top:0.5rem;"><strong>OCR cleanup</strong></div>
+  <div>Raw: {{ metrics.prompt.cleanup.raw_chars }} chars / {{ metrics.prompt.cleanup.raw_lines }} lines</div>
+  <div>Cleaned: {{ metrics.prompt.cleanup.cleaned_chars }} chars / {{ metrics.prompt.cleanup.cleaned_lines }} lines</div>
+  <div>Provided lines: {{ metrics.prompt.cleanup.provided_lines }} → After filter: {{ metrics.prompt.cleanup.provided_lines_cleaned }}</div>
+  {% endif %}
       </div>
       <div>
         <div><strong>Response</strong></div>

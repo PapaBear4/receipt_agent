@@ -19,7 +19,7 @@ from app.services.jobs import job_manager, Job
 from app.services.db import init_db
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
-from app.services.db import insert_receipt, insert_line_items, clear_line_items
+from app.services.db import insert_receipt, insert_line_items, clear_line_items, insert_llm_run, get_llm_stats
 
 app = FastAPI(title="Receipt Agent MVP")
 
@@ -108,6 +108,16 @@ async def health_llm_test(q: str = "Walmart 06/09/2025 Total $14.23"):
     return {"model": used_model, "fields": fields}
 
 
+@app.get("/metrics/llm", response_class=HTMLResponse)
+async def llm_metrics_dashboard(request: Request):
+    try:
+        stats = get_llm_stats()
+    except Exception as e:
+        stats = []
+        logger.debug("Failed to load llm stats: %s", e)
+    return templates.TemplateResponse("llm_stats.html", {"request": request, "stats": stats})
+
+
 def _build_review_context(
     request: Request,
     src_path: Path,
@@ -156,6 +166,12 @@ def _build_review_context(
     used_model = select_model()
     if settings.DEBUG:
         logger.debug("LLM fields: keys=%s", list(fields.keys()))
+    # Persist an llm_run telemetry row
+    try:
+        if fields.get("metrics"):
+            insert_llm_run(filename, used_model, fields["metrics"])  # type: ignore[arg-type]
+    except Exception as e:
+        logger.debug("Failed to insert llm_run: %s", e)
 
     # Defaults for review form
     date_val = normalize_date_to_mmddyyyy(fields.get("date", ""))
@@ -412,10 +428,15 @@ async def review_existing(request: Request, file: str = Query(..., alias="file")
         original = file.split("_", 1)[1]
     except Exception:
         original = file
-    if not rerun:
-        cached = _load_cached_review_context(request, file, original)
-        if cached:
-            return templates.TemplateResponse("review.html", cached)
+    if rerun:
+        # Recompute artifacts once, then redirect to avoid repeated reruns on refresh
+        _ = _build_review_context(request, src_path, original)
+        return RedirectResponse(url=f"/review?file={file}", status_code=303)
+    # Cache-first path
+    cached = _load_cached_review_context(request, file, original)
+    if cached:
+        return templates.TemplateResponse("review.html", cached)
+    # Fallback: build now if cache missing
     ctx = _build_review_context(request, src_path, original)
     logger.info("Rendering review page for existing upload: %s", file)
     return templates.TemplateResponse("review.html", ctx)

@@ -51,6 +51,29 @@ CREATE TABLE IF NOT EXISTS line_items (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (receipt_id) REFERENCES receipts(id)
 );
+
+-- Track LLM extraction performance over time
+CREATE TABLE IF NOT EXISTS llm_runs (
+    id INTEGER PRIMARY KEY,
+    stored_name TEXT NOT NULL,
+    model TEXT,
+    prompt_chars INTEGER,
+    prompt_lines INTEGER,
+    indexed_lines INTEGER,
+    include_full_text INTEGER,
+    long_input INTEGER,
+    full_text_sent_chars INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    wall_sec REAL,
+    total_sec REAL,
+    prompt_eval_sec REAL,
+    eval_sec REAL,
+    tps_completion REAL,
+    tps_end_to_end REAL,
+    prep_sec REAL,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -81,6 +104,7 @@ def init_db() -> None:
         _ensure_column(conn, "line_items", "ocr_text", "TEXT")
         _ensure_column(conn, "line_items", "line_index", "INTEGER")
         _ensure_column(conn, "line_items", "confidence", "REAL")
+    # Ensure llm_runs table exists (already created by SCHEMA_SQL); add columns if we extend later
         conn.commit()
 
 
@@ -189,3 +213,76 @@ def insert_line_items(receipt_id: int, items: Sequence[dict]) -> int:
         )
         conn.commit()
         return len(rows)
+
+
+def insert_llm_run(stored_name: str, model: str | None, metrics: dict) -> None:
+    if not stored_name or not metrics:
+        return
+    p = metrics.get("prompt", {}) or {}
+    r = metrics.get("response", {}) or {}
+    t = metrics.get("timing", {}) or {}
+    now = int(time.time())
+    def _i(x):
+        try:
+            return int(x)
+        except Exception:
+            return None
+    def _f(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO llm_runs(
+              stored_name, model,
+              prompt_chars, prompt_lines, indexed_lines, include_full_text, long_input, full_text_sent_chars,
+              prompt_tokens, completion_tokens,
+              wall_sec, total_sec, prompt_eval_sec, eval_sec,
+              tps_completion, tps_end_to_end, prep_sec,
+              created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                stored_name,
+                str(model or ""),
+                _i(p.get("chars")),
+                _i(p.get("lines")),
+                _i(p.get("indexed_lines")),
+                1 if p.get("include_full_text") else 0,
+                1 if p.get("long_input") else 0,
+                _i((p.get("cleanup") or {}).get("full_text_sent_chars")),
+                _i(r.get("prompt_tokens")),
+                _i(r.get("completion_tokens")),
+                _f(t.get("wall_sec")),
+                _f(t.get("total_sec")),
+                _f(t.get("prompt_eval_sec")),
+                _f(t.get("eval_sec")),
+                _f(t.get("tps_completion")),
+                _f(t.get("tps_end_to_end")),
+                _f(t.get("prep_sec")),
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def get_llm_stats() -> list[dict]:
+    """Return basic aggregates of llm_runs grouped by model."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT model,
+                   COUNT(*) AS n,
+                   AVG(wall_sec) AS avg_wall,
+                   AVG(tps_end_to_end) AS avg_tps,
+                   AVG(prompt_chars) AS avg_prompt_chars,
+                   AVG(indexed_lines) AS avg_indexed_lines,
+                   AVG(include_full_text) AS full_text_rate
+            FROM llm_runs
+            GROUP BY model
+            ORDER BY n DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]

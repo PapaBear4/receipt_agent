@@ -140,15 +140,19 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
     On any failure, returns empty defaults so the UI can allow manual entry.
     """
     try:
+        tprep0 = time.perf_counter()
         # Clean OCR text (whitespace and obvious boilerplate) before sizing decisions
         raw = (ocr_text or "")
+        raw_no_cr = raw.replace("\r", "")
+        raw_lines_list = raw_no_cr.split("\n")
         # Normalize whitespace and strip repeated separators to reduce noise
         ocr_clean = "\n".join(
             [
                 " ".join(part.split())
-                for part in (raw.replace("\r", "").split("\n"))
+                for part in raw_lines_list
             ]
         ).strip()
+        cleaned_text_lines_list = ocr_clean.split("\n") if ocr_clean else []
         # Optional: remove ultra-short junk lines (e.g., single symbols) but keep prices and dates
         def _looks_useful(line: str) -> bool:
             if not line:
@@ -178,14 +182,13 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         include_full_text = bool(getattr(settings, "LLM_INCLUDE_FULL_TEXT", True))
         only_indexed_when_long = bool(getattr(settings, "LLM_ONLY_INDEXED_WHEN_LONG", True))
 
+        included_lines_count = 0
         if ocr_lines_clean:
-            try:
-                preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
-                if max_lines and len(preview_lines) > max_lines:
-                    preview_lines = preview_lines[:max_lines]
-                lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
-            except Exception:
-                lines_block = ""
+            preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
+            if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
+                preview_lines = preview_lines[:max_lines]
+            included_lines_count = len(preview_lines)
+            lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
 
         # Decide whether to include full OCR text alongside indexed lines
         prompt_parts: List[str] = [EXTRACTION_PROMPT]
@@ -197,13 +200,10 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             prompt_parts.append(lines_block)
         prompt_text = "\n\n".join([p for p in prompt_parts if p]) + "\n"
         # Prompt metrics
-        try:
-            included_lines_count = len(preview_lines) if ocr_lines_clean else 0  # type: ignore[name-defined]
-        except Exception:
-            included_lines_count = 0
         include_full_text_effective = bool(include_full_text and not (only_indexed_when_long and long_input))
         prompt_chars = len(prompt_text)
         prompt_line_count = prompt_text.count("\n") + 1
+        prep_sec = max(0.0, time.perf_counter() - tprep0)
 
         payload = {
             "model": used_model,
@@ -303,9 +303,19 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 "chars": prompt_chars,
                 "lines": prompt_line_count,
                 "include_full_text": include_full_text_effective,
+                "long_input": bool(long_input),
                 "indexed_lines": included_lines_count,
                 "max_chars": max_chars,
                 "max_lines": max_lines,
+                "cleanup": {
+                    "raw_chars": len(raw_no_cr),
+                    "raw_lines": len(raw_lines_list),
+                    "cleaned_chars": len(ocr_clean),
+                    "cleaned_lines": len(cleaned_text_lines_list),
+                    "provided_lines": len(ocr_lines or []),
+                    "provided_lines_cleaned": len(ocr_lines_clean),
+                    "full_text_sent_chars": (len(ocr_snippet) if include_full_text_effective else 0),
+                },
             },
             "response": {
                 "chars": response_chars,
@@ -321,6 +331,7 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 "eval_sec": eval_sec,
                 "tps_completion": tps_completion,
                 "tps_end_to_end": tps_end_to_end,
+                "prep_sec": prep_sec,
             },
         }
 

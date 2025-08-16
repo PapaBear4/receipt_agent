@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Metrics</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #f7f7f7; text-align: left; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>LLM Metrics</h1>
+  <p class="muted">Aggregated by model. ETA is a rough estimate driven by average end-to-end tokens/sec and average prompt size.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Runs</th>
+        <th>Avg Wall (s)</th>
+        <th>Avg TPS (e2e)</th>
+        <th>Avg Prompt Chars</th>
+        <th>Avg Indexed Lines</th>
+        <th>Full Text Rate</th>
+        <th>ETA For 200 lines</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in stats %}
+      {% set tps = s.avg_tps if s.avg_tps is not none else 0 %}
+      {% set eta = (200 / 3.0) / tps if tps and tps > 0 else None %}
+      <tr>
+        <td>{{ s.model }}</td>
+        <td>{{ s.n }}</td>
+        <td>{{ '%.2f'|format(s.avg_wall) if s.avg_wall is not none else 'n/a' }}</td>
+        <td>{{ '%.1f'|format(s.avg_tps) if s.avg_tps is not none else 'n/a' }}</td>
+        <td>{{ '%.0f'|format(s.avg_prompt_chars) if s.avg_prompt_chars is not none else 'n/a' }}</td>
+        <td>{{ '%.0f'|format(s.avg_indexed_lines) if s.avg_indexed_lines is not none else 'n/a' }}</td>
+        <td>{{ '%.0f'|format(100.0 * s.full_text_rate) if s.full_text_rate is not none else 'n/a' }}%</td>
+        <td>{{ '%.1f'|format(eta) if eta is not none else 'n/a' }} s</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">ETA formula: assume ~3 tokens/line context and divide by average end-to-end TPS; refine as you collect more data.</p>
+</body>
+</html>

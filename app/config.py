@@ -41,7 +41,7 @@ class Settings:
     # LLM (Ollama)
     OLLAMA_ENDPOINT: str = os.getenv("OLLAMA_ENDPOINT", "http://127.0.0.1:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
-    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "1200")) # measured in seconds
+    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "2400")) # measured in seconds
 
     # LLM prompt sizing & content (env overridable)
     # If LLM_MAX_CHARS <= 0, do not truncate OCR text by characters.

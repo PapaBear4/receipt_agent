@@ -70,6 +70,37 @@
   {% if ocr_json_url %}
   <p><a href="{{ ocr_json_url }}" download>Download OCR JSON</a></p>
   {% endif %}
+  {% if metrics %}
+  <div class="card" style="margin:1rem 0;">
+    <h3 style="margin-top:0;">LLM Metrics</h3>
+    <div style="display:flex; flex-wrap:wrap; gap:1rem;">
+      <div>
+        <div><strong>Prompt</strong></div>
+        <div>Chars: {{ metrics.prompt.chars }}</div>
+        <div>Lines: {{ metrics.prompt.lines }}</div>
+        <div>Indexed lines: {{ metrics.prompt.indexed_lines }}</div>
+        <div>Full text included: {{ 'yes' if metrics.prompt.include_full_text else 'no' }}</div>
+        <div>Limits: chars={{ metrics.prompt.max_chars }}, lines={{ metrics.prompt.max_lines }}</div>
+      </div>
+      <div>
+        <div><strong>Response</strong></div>
+        <div>Chars: {{ metrics.response.chars }}</div>
+        <div>Prompt tokens: {{ metrics.response.prompt_tokens if metrics.response.prompt_tokens is not none else 'n/a' }}</div>
+        <div>Completion tokens: {{ metrics.response.completion_tokens if metrics.response.completion_tokens is not none else 'n/a' }}</div>
+        <div>Items parsed: {{ metrics.response.items }}</div>
+      </div>
+      <div>
+        <div><strong>Timing</strong></div>
+        <div>Wall: {{ '%.3f'|format(metrics.timing.wall_sec) if metrics.timing.wall_sec is not none else 'n/a' }}s</div>
+        <div>Total: {{ '%.3f'|format(metrics.timing.total_sec) if metrics.timing.total_sec is not none else 'n/a' }}s</div>
+        <div>Prompt eval: {{ '%.3f'|format(metrics.timing.prompt_eval_sec) if metrics.timing.prompt_eval_sec is not none else 'n/a' }}s</div>
+        <div>Completion eval: {{ '%.3f'|format(metrics.timing.eval_sec) if metrics.timing.eval_sec is not none else 'n/a' }}s</div>
+        <div>TPS (completion): {{ '%.1f'|format(metrics.timing.tps_completion) if metrics.timing.tps_completion is not none else 'n/a' }}</div>
+        <div>TPS (end-to-end): {{ '%.1f'|format(metrics.timing.tps_end_to_end) if metrics.timing.tps_end_to_end is not none else 'n/a' }}</div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
   <p>
     <a href="/review?file={{ stored_filename }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
   </p>

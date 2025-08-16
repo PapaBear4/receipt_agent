@@ -292,6 +292,7 @@ def _build_review_context(
         "memo": memo_val,
     "payment": fields.get("payment", {}),
     "items": fields.get("items", []),
+    "metrics": fields.get("metrics"),
         "stored_filename": filename,
         "original_filename": original_filename,
         "assoc": associated_lines,
@@ -333,6 +334,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
         used_model = fields_doc.get("used_model", "")
         payment = (fields.get("payment") or {})
         items = (fields.get("items") or [])
+        metrics = fields.get("metrics")
         # Pre-fill values
         date_val = normalize_date_to_mmddyyyy(str(fields.get("date", "")))
         payee_val = str(fields.get("payee", ""))
@@ -388,6 +390,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
             "assoc_csv": assoc_csv,
             "ocr_lines": lines,
             "used_model": used_model,
+            "metrics": metrics,
             "debug": settings.DEBUG,
         }
     except Exception as e:

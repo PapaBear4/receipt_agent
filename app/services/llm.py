@@ -140,11 +140,33 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
     On any failure, returns empty defaults so the UI can allow manual entry.
     """
     try:
-        # Truncate overly long OCR text to keep prompt reasonable
-        ocr_snippet = (ocr_text or "")
-        max_chars = 8000
-        if len(ocr_snippet) > max_chars:
-            ocr_snippet = ocr_snippet[:max_chars]
+        # Clean OCR text (whitespace and obvious boilerplate) before sizing decisions
+        raw = (ocr_text or "")
+        # Normalize whitespace and strip repeated separators to reduce noise
+        ocr_clean = "\n".join(
+            [
+                " ".join(part.split())
+                for part in (raw.replace("\r", "").split("\n"))
+            ]
+        ).strip()
+        # Optional: remove ultra-short junk lines (e.g., single symbols) but keep prices and dates
+        def _looks_useful(line: str) -> bool:
+            if not line:
+                return False
+            s = line.strip()
+            if len(s) <= 1:
+                return False
+            # Keep lines with digits or currency-like characters
+            keep_chars = any(c.isdigit() for c in s) or any(ch in s for ch in "$€£%")
+            return keep_chars or len(s) >= 4
+        ocr_lines_clean = [ln for ln in (ocr_lines or []) if _looks_useful(str(ln))]
+
+        # Apply configurable truncation/limits
+        max_chars = int(getattr(settings, "LLM_MAX_CHARS", 0))
+        if max_chars and max_chars > 0 and len(ocr_clean) > max_chars:
+            ocr_snippet = ocr_clean[:max_chars]
+        else:
+            ocr_snippet = ocr_clean
 
         used_model = select_model(settings.OLLAMA_MODEL)
         if used_model != settings.OLLAMA_MODEL:
@@ -152,30 +174,63 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
 
         # Prepare OCR lines block with indices for line correlation
         lines_block = ""
-        if ocr_lines:
+        max_lines = int(getattr(settings, "LLM_MAX_LINES", 250))
+        include_full_text = bool(getattr(settings, "LLM_INCLUDE_FULL_TEXT", True))
+        only_indexed_when_long = bool(getattr(settings, "LLM_ONLY_INDEXED_WHEN_LONG", True))
+
+        if ocr_lines_clean:
             try:
-                preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines)]
-                # Truncate lines block if very large
-                max_lines = 200
-                if len(preview_lines) > max_lines:
+                preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
+                if max_lines and len(preview_lines) > max_lines:
                     preview_lines = preview_lines[:max_lines]
                 lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
             except Exception:
                 lines_block = ""
 
+        # Decide whether to include full OCR text alongside indexed lines
+        prompt_parts: List[str] = [EXTRACTION_PROMPT]
+        long_input = (max_chars and len(ocr_clean) >= max_chars) or (max_lines and len(ocr_lines_clean) >= max_lines)
+        if include_full_text and not (only_indexed_when_long and long_input):
+            prompt_parts.append("\nOCR TEXT:\n" + (ocr_snippet or ""))
+        # Always include indexed lines if available (more structured)
+        if lines_block:
+            prompt_parts.append(lines_block)
+        prompt_text = "\n\n".join([p for p in prompt_parts if p]) + "\n"
+        # Prompt metrics
+        try:
+            included_lines_count = len(preview_lines) if ocr_lines_clean else 0  # type: ignore[name-defined]
+        except Exception:
+            included_lines_count = 0
+        include_full_text_effective = bool(include_full_text and not (only_indexed_when_long and long_input))
+        prompt_chars = len(prompt_text)
+        prompt_line_count = prompt_text.count("\n") + 1
+
         payload = {
             "model": used_model,
-            "prompt": f"{EXTRACTION_PROMPT}\n\nOCR TEXT:\n{ocr_snippet}{lines_block}\n",
+            "prompt": prompt_text,
             "stream": False,
             # Ask Ollama to constrain output to JSON if supported
             "format": "json",
         }
         url = f"{settings.OLLAMA_ENDPOINT}/api/generate"
+        t0 = time.perf_counter()
         resp = _http_post(url, payload, settings.OLLAMA_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
+        t1 = time.perf_counter()
         # Ollama returns { 'response': '...model text...' }
         text = (data.get("response", "") or "").strip()
+        # Extract optional token/duration metrics from Ollama
+        prompt_tokens = data.get("prompt_eval_count")
+        completion_tokens = data.get("eval_count")
+        total_ns = data.get("total_duration") or 0
+        load_ns = data.get("load_duration") or 0
+        prompt_eval_ns = data.get("prompt_eval_duration") or 0
+        eval_ns = data.get("eval_duration") or 0
+        wall_sec = max(0.0, t1 - t0)
+        total_sec = (float(total_ns) / 1e9) if total_ns else None
+        eval_sec = (float(eval_ns) / 1e9) if eval_ns else None
+        prompt_eval_sec = (float(prompt_eval_ns) / 1e9) if prompt_eval_ns else None
 
         # Attempt to parse JSON directly first
         obj: Dict[str, Any] = {}
@@ -227,8 +282,49 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 })
             except Exception:
                 continue
+        # Response metrics
+        response_chars = len(text)
+        tps_completion = None
+        tps_end_to_end = None
+        try:
+            if completion_tokens is not None and eval_sec and eval_sec > 0:
+                tps_completion = float(completion_tokens) / float(eval_sec)
+        except Exception:
+            tps_completion = None
+        try:
+            if total_sec and total_sec > 0 and (prompt_tokens or completion_tokens):
+                all_tokens = int(prompt_tokens or 0) + int(completion_tokens or 0)
+                tps_end_to_end = float(all_tokens) / float(total_sec)
+        except Exception:
+            tps_end_to_end = None
 
-        return {"date": date, "payee": payee, "total": total, "payment": payment, "items": items}
+        metrics = {
+            "prompt": {
+                "chars": prompt_chars,
+                "lines": prompt_line_count,
+                "include_full_text": include_full_text_effective,
+                "indexed_lines": included_lines_count,
+                "max_chars": max_chars,
+                "max_lines": max_lines,
+            },
+            "response": {
+                "chars": response_chars,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "items": len(items),
+            },
+            "timing": {
+                "wall_sec": wall_sec,
+                "total_sec": total_sec,
+                "load_sec": (float(load_ns) / 1e9) if load_ns else None,
+                "prompt_eval_sec": prompt_eval_sec,
+                "eval_sec": eval_sec,
+                "tps_completion": tps_completion,
+                "tps_end_to_end": tps_end_to_end,
+            },
+        }
+
+        return {"date": date, "payee": payee, "total": total, "payment": payment, "items": items, "metrics": metrics}
     except requests.exceptions.RequestException as e:
         logging.error("LLM HTTP error: %s", e)
         return {"date": "", "payee": "", "total": 0.0}

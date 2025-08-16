@@ -38,7 +38,7 @@ Minimal FastAPI app to OCR receipt images, extract fields with a local LLM (Olla
 - LLM
   - `OLLAMA_ENDPOINT` (default `http://127.0.0.1:11434`)
   - `OLLAMA_MODEL` (default `llama3.1:8b-instruct-q4_0`)
-  - `OLLAMA_TIMEOUT` (default `600` seconds)
+  - `OLLAMA_TIMEOUT` (default `1200` seconds)
 - OCR tuning (sane defaults)
   - `OCR_RAW_ONLY` (default `true`)
   - `OCR_PSMS`, `OCR_OEM`, `OCR_USE_WHITELIST`, `OCR_DISABLE_DICTIONARY`, `OCR_PRESERVE_SPACES`, `OCR_USER_DPI`

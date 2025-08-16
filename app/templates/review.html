@@ -70,6 +70,9 @@
   {% if ocr_json_url %}
   <p><a href="{{ ocr_json_url }}" download>Download OCR JSON</a></p>
   {% endif %}
+  <p>
+    <a href="/review?file={{ stored_filename }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
+  </p>
       <h3>Raw OCR Text</h3>
       <textarea readonly>{{ raw_text }}</textarea>
       {% if ocr_lines and assoc %}
@@ -101,6 +104,41 @@
           <label for="memo">Memo</label>
           <input id="memo" name="memo" type="text" value="{{ memo }}" required />
         </div>
+        <h3>Payment Details</h3>
+        <div class="field"><label>Subtotal</label><input name="subtotal" type="text" value="{{ payment.subtotal if payment else '' }}" /></div>
+        <div class="field"><label>Tax</label><input name="tax" type="text" value="{{ payment.tax if payment else '' }}" /></div>
+        <div class="field"><label>Tip</label><input name="tip" type="text" value="{{ payment.tip if payment else '' }}" /></div>
+        <div class="field"><label>Discounts</label><input name="discounts" type="text" value="{{ payment.discounts if payment else '' }}" /></div>
+        <div class="field"><label>Fees</label><input name="fees" type="text" value="{{ payment.fees if payment else '' }}" /></div>
+        <div class="field"><label>Method</label><input name="method" type="text" value="{{ payment.method if payment else '' }}" /></div>
+        <div class="field"><label>Last 4</label><input name="last4" type="text" value="{{ payment.last4 if payment else '' }}" /></div>
+
+        <h3>Items</h3>
+        <input type="hidden" name="items_json" id="items_json" />
+        <table style="width:100%; border-collapse: collapse;">
+          <thead>
+            <tr>
+              <th style="border-bottom:1px solid #ddd; text-align:left;">OCR Line</th>
+              <th style="border-bottom:1px solid #ddd; text-align:left;">Best Guess (editable)</th>
+              <th style="border-bottom:1px solid #ddd;">Qty</th>
+              <th style="border-bottom:1px solid #ddd;">Unit</th>
+              <th style="border-bottom:1px solid #ddd;">Amount</th>
+              <th style="border-bottom:1px solid #ddd;">Conf</th>
+            </tr>
+          </thead>
+          <tbody id="items_tbody">
+            {% for it in items %}
+            <tr>
+              <td style="padding:4px 6px; font-size:0.9rem; color:#555;">{{ it.ocr_text }}</td>
+              <td style="padding:4px 6px;"><input type="text" class="it-name" value="{{ it.name }}" style="width:100%" data-line-index="{{ it.line_index }}" data-ocr-text="{{ it.ocr_text }}" /></td>
+              <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-qty" value="{{ '%.2f'|format(it.qty) if it.qty is defined else '' }}" step="0.01" /></td>
+              <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-unit" value="{{ '%.2f'|format(it.unit_price) if it.unit_price is defined else '' }}" step="0.01" /></td>
+              <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-amount" value="{{ '%.2f'|format(it.amount) if it.amount is defined else '' }}" step="0.01" /></td>
+              <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-conf" value="{{ '%.2f'|format(it.confidence) if it.confidence is defined else '' }}" min="0" max="1" step="0.01" /></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
         <div class="actions">
           <button type="submit">Save</button>
           <a href="/">Cancel</a>
@@ -116,6 +154,8 @@
       const zoomOut = document.getElementById('zoomOut');
       const toggleOverlay = document.getElementById('toggleOverlay');
       const form = document.getElementById('reviewForm');
+  const itemsBody = document.getElementById('items_tbody');
+  const itemsJson = document.getElementById('items_json');
 
       let scale = 1.0;
       function applyScale() {
@@ -133,8 +173,33 @@
         if (e.key === '[') { scale = clamp(scale / 1.15, 0.5, 5); applyScale(); }
         else if (e.key === ']') { scale = clamp(scale * 1.15, 0.5, 5); applyScale(); }
         else if (e.key.toLowerCase() === 'o' && imgAnnotated && toggleOverlay) { toggleOverlay.checked = !toggleOverlay.checked; imgAnnotated.style.display = toggleOverlay.checked ? '' : 'none'; }
-        else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { if (form) form.submit(); }
+        else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { if (form) form.requestSubmit(); }
       });
+
+      function collectItems() {
+        const rows = itemsBody ? Array.from(itemsBody.querySelectorAll('tr')) : [];
+        return rows.map(r => {
+          const name = r.querySelector('.it-name');
+          const qty = r.querySelector('.it-qty');
+          const unit = r.querySelector('.it-unit');
+          const amount = r.querySelector('.it-amount');
+          const conf = r.querySelector('.it-conf');
+          return {
+            line_index: name ? parseInt(name.getAttribute('data-line-index')||'-1', 10) : -1,
+            ocr_text: name ? (name.getAttribute('data-ocr-text')||'') : '',
+            name: name ? name.value : '',
+            qty: qty && qty.value ? parseFloat(qty.value) : 0,
+            unit_price: unit && unit.value ? parseFloat(unit.value) : 0,
+            amount: amount && amount.value ? parseFloat(amount.value) : 0,
+            confidence: conf && conf.value ? Math.max(0, Math.min(1, parseFloat(conf.value))) : 0,
+          };
+        });
+      }
+      if (form && itemsJson) {
+        form.addEventListener('submit', () => {
+          try { itemsJson.value = JSON.stringify(collectItems()); } catch {}
+        });
+      }
     })();
   </script>
 </body>

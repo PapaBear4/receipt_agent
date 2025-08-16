@@ -19,7 +19,7 @@ from app.services.jobs import job_manager, Job
 from app.services.db import init_db
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
-from app.services.db import insert_receipt
+from app.services.db import insert_receipt, insert_line_items, clear_line_items
 
 app = FastAPI(title="Receipt Agent MVP")
 
@@ -569,6 +569,16 @@ async def save_receipt(
     payee: str = Form(...),
     outflow: str = Form(...),
     memo: str = Form(...),
+    # Optional payment fields
+    subtotal: Optional[str] = Form(None),
+    tax: Optional[str] = Form(None),
+    tip: Optional[str] = Form(None),
+    discounts: Optional[str] = Form(None),
+    fees: Optional[str] = Form(None),
+    method: Optional[str] = Form(None),
+    last4: Optional[str] = Form(None),
+    # Items JSON from the form (stringified JSON array)
+    items_json: Optional[str] = Form(None),
 ):
     # Validate
     logger.info("Saving receipt: stored=%s original=%s", stored_filename, original_filename)
@@ -645,7 +655,25 @@ async def save_receipt(
 
     # Persist to DB (best-effort; does not block redirect)
     try:
-        rid = insert_receipt(stored_filename, original_filename, norm_date, amount, payee, memo)
+        payment = {
+            "subtotal": subtotal or 0,
+            "tax": tax or 0,
+            "tip": tip or 0,
+            "discounts": discounts or 0,
+            "fees": fees or 0,
+            "method": (method or "").strip(),
+            "last4": (last4 or "").strip(),
+        }
+        rid = insert_receipt(stored_filename, original_filename, norm_date, amount, payee, memo, payment)
+        # Items
+        if items_json:
+            try:
+                items = json.loads(items_json)
+                clear_line_items(rid)
+                n = insert_line_items(rid, items)
+                logger.info("Saved %d line items to DB for receipt id=%s", n, rid)
+            except Exception:
+                logger.exception("Failed parsing/saving items for receipt id=%s", rid)
         logger.info("Saved receipt to DB: id=%s stored=%s", rid, stored_filename)
     except Exception:
         logger.exception("Failed to save receipt in DB: stored=%s", stored_filename)

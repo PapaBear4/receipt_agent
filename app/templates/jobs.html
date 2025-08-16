@@ -32,7 +32,7 @@
         <th>Stored</th>
         <th>Status</th>
         <th>Error</th>
-        <th>Action</th>
+  <th>Action</th>
       </tr>
     </thead>
     <tbody>
@@ -45,7 +45,8 @@
         <td>{{ j.error }}</td>
         <td>
           {% if j.review_url %}
-          <a href="{{ j.review_url }}">Review</a>
+            <a href="{{ j.review_url }}">Review</a>
+            · <a href="{{ j.review_url }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
           {% else %}—{% endif %}
         </td>
       </tr>

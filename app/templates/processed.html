@@ -24,7 +24,10 @@
         <div class="muted">No overlay</div>
       {% endif %}
       <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-        {% if it.review_url %}<a href="{{ it.review_url }}">Review</a>{% endif %}
+        {% if it.review_url %}
+          <a href="{{ it.review_url }}">Review</a>
+          <a href="{{ it.review_url }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
+        {% endif %}
         {% if it.ocr_json_url %}<a href="{{ it.ocr_json_url }}" download>OCR JSON</a>{% endif %}
       </div>
     </div>

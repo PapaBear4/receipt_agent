@@ -70,6 +70,23 @@
   {% if ocr_json_url %}
   <p><a href="{{ ocr_json_url }}" download>Download OCR JSON</a></p>
   {% endif %}
+  <div class="card" style="margin:1rem 0;">
+    <h3 style="margin-top:0; display:flex; align-items:center; gap:0.5rem;">Live LLM Stream
+      <button type="button" id="streamBtn" style="margin-left:auto;">Start</button>
+      <button type="button" id="streamStopBtn">Stop</button>
+      <a href="/metrics/llm" target="_blank" class="badge" style="margin-left:0.5rem;">LLM Metrics</a>
+    </h3>
+    <div id="streamPanel" style="display:none;">
+      <div id="streamStatus" class="muted" style="margin-bottom:0.5rem; color:#666;">Idle</div>
+      <pre id="streamLog" style="background:#fafafa; border:1px solid #eee; padding:8px; height:160px; overflow:auto; white-space:pre-wrap;"></pre>
+      <div id="streamSummary" style="margin-top:0.5rem;"></div>
+      <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
+        <button type="button" id="applyStreamBtn" disabled>Apply to form</button>
+        <span id="streamStats" class="muted" style="align-self:center; color:#666;"></span>
+        <span id="eta" class="muted" style="align-self:center; color:#666;"></span>
+      </div>
+    </div>
+  </div>
   {% if metrics %}
   <div class="card" style="margin:1rem 0;">
     <h3 style="margin-top:0;">LLM Metrics</h3>
@@ -109,6 +126,8 @@
   {% endif %}
   <p>
     <a href="/review?file={{ stored_filename }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
+  &nbsp;|&nbsp;
+  <a href="#" id="streamLink" title="Stream LLM output live">Live Re-process (stream)</a>
   </p>
       <h3>Raw OCR Text</h3>
       <textarea readonly>{{ raw_text }}</textarea>
@@ -193,6 +212,23 @@
       const form = document.getElementById('reviewForm');
   const itemsBody = document.getElementById('items_tbody');
   const itemsJson = document.getElementById('items_json');
+  const streamBtn = document.getElementById('streamBtn');
+  const streamStopBtn = document.getElementById('streamStopBtn');
+  const streamLink = document.getElementById('streamLink');
+  const streamPanel = document.getElementById('streamPanel');
+  const streamLog = document.getElementById('streamLog');
+  const streamStatus = document.getElementById('streamStatus');
+  const streamSummary = document.getElementById('streamSummary');
+  const applyStreamBtn = document.getElementById('applyStreamBtn');
+  const streamStats = document.getElementById('streamStats');
+  const etaEl = document.getElementById('eta');
+  const storedInput = document.querySelector('input[name="stored_filename"]');
+  let es = null;
+  let lastStreamObj = null;
+  let lastStreamMetrics = null;
+  let sid = null;
+  let avgTpsCache = null;
+  let avgWallCache = null;
 
       let scale = 1.0;
       function applyScale() {
@@ -237,6 +273,145 @@
           try { itemsJson.value = JSON.stringify(collectItems()); } catch {}
         });
       }
+
+      function appendLog(text) {
+        if (!streamLog) return;
+        streamLog.textContent += text;
+        streamLog.scrollTop = streamLog.scrollHeight;
+      }
+      function fmtSecs(s){ return s != null ? (Math.round(s*10)/10)+'s' : 'n/a'; }
+      function renderMetrics(m){
+        if (!m) return '';
+        const p = m.prompt || {}; const t = m.timing || {}; const r = m.response || {};
+        return `Prompt: ${p.chars||0} chars, ${p.lines||0} lines; indexed ${p.indexed_lines||0}; full text ${p.include_full_text?'yes':'no'}\n`
+             + `Timing: wall ${fmtSecs(t.wall_sec)}; eval ${fmtSecs(t.eval_sec)}; TPS(e2e) ${t.tps_end_to_end? t.tps_end_to_end.toFixed(1):'n/a'}`;
+      }
+      function applyResultToForm(obj){
+        if (!obj) return;
+        try {
+          const d = document.getElementById('date'); if (d && obj.date) d.value = obj.date;
+          const p = document.getElementById('payee'); if (p && obj.payee) p.value = obj.payee;
+          const o = document.getElementById('outflow'); if (o && (obj.total!=null)) o.value = (parseFloat(obj.total)||0).toFixed(2);
+          const pay = obj.payment || {};
+          const set = (name, val)=>{ const el = document.querySelector(`[name="${name}"]`); if (el && (val!=null)) el.value = val; };
+          set('subtotal', pay.subtotal); set('tax', pay.tax); set('tip', pay.tip); set('discounts', pay.discounts); set('fees', pay.fees); set('method', pay.method); set('last4', pay.last4);
+          const items = obj.items || [];
+          if (itemsBody) {
+            itemsBody.innerHTML = '';
+            items.forEach(it => {
+              const tr = document.createElement('tr');
+              tr.innerHTML = `
+                <td style="padding:4px 6px; font-size:0.9rem; color:#555;">${(it.ocr_text||'')}</td>
+                <td style="padding:4px 6px;"><input type="text" class="it-name" value="${(it.name||'')}" style="width:100%" data-line-index="${(it.line_index!=null?it.line_index:-1)}" data-ocr-text="${(it.ocr_text||'')}" /></td>
+                <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-qty" value="${(it.qty!=null?Number(it.qty).toFixed(2):'')}" step="0.01" /></td>
+                <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-unit" value="${(it.unit_price!=null?Number(it.unit_price).toFixed(2):'')}" step="0.01" /></td>
+                <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-amount" value="${(it.amount!=null?Number(it.amount).toFixed(2):'')}" step="0.01" /></td>
+                <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-conf" value="${(it.confidence!=null?Number(it.confidence).toFixed(2):'')}" min="0" max="1" step="0.01" /></td>`;
+              itemsBody.appendChild(tr);
+            });
+          }
+        } catch {}
+      }
+      async function loadAverages(){
+        try {
+          const r = await fetch('/metrics/llm.json');
+          if (!r.ok) return;
+          const list = await r.json();
+          const usedModelBadge = document.querySelector('.badge.ok');
+          const model = usedModelBadge ? usedModelBadge.textContent.replace('LLM: ','').trim() : '';
+          const entry = (list||[]).find(x => (x.model||'')===model);
+          if (entry) {
+            avgTpsCache = entry.avg_tps || null;
+            avgWallCache = entry.avg_wall || null;
+          }
+        } catch {}
+      }
+
+      function computeEta(metrics){
+        try {
+          if (!metrics) return '';
+          const p = metrics.prompt||{};
+          // Estimate tokens as ~ chars/4 if we don't have token counts yet
+          const estTokens = (p.chars ? Math.max(1, Math.round(p.chars/4)) : null);
+          if (avgTpsCache && estTokens) {
+            const sec = estTokens / avgTpsCache;
+            if (isFinite(sec)) return `ETA ~ ${Math.round(sec)}s`;
+          }
+          if (avgWallCache) return `ETA ~ ${Math.round(avgWallCache)}s`;
+        } catch {}
+        return '';
+      }
+
+      function startStream(){
+        const stored = storedInput ? storedInput.value : '';
+        if (!stored) return;
+        if (es) { try { es.close(); } catch(e){} }
+        if (streamPanel) streamPanel.style.display = '';
+        if (streamLog) streamLog.textContent = '';
+        streamSummary.innerHTML = '';
+        lastStreamObj = null; lastStreamMetrics = null;
+        streamStatus.textContent = 'Connecting...';
+        sid = Math.random().toString(36).slice(2);
+        es = new EventSource(`/review/stream?file=${encodeURIComponent(stored)}&sid=${encodeURIComponent(sid)}`);
+        const startedAt = Date.now();
+        es.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data.type === 'start') {
+              streamStatus.textContent = `Started with model ${data.model}`;
+              lastStreamMetrics = data.metrics;
+              streamStats.textContent = renderMetrics(lastStreamMetrics);
+              if (etaEl) {
+                const e = computeEta(lastStreamMetrics);
+                etaEl.textContent = e;
+              }
+            } else if (data.type === 'delta') {
+              appendLog(data.delta);
+              const elapsed = (Date.now()-startedAt)/1000;
+              streamStatus.textContent = `Streaming... ${Math.round(elapsed)}s`;
+            } else if (data.type === 'done') {
+              appendLog('\n\n[done]\n');
+              lastStreamObj = data.object || null;
+              lastStreamMetrics = data.metrics || lastStreamMetrics;
+              streamStats.textContent = renderMetrics(lastStreamMetrics);
+              streamSummary.textContent = JSON.stringify(data.object || {}, null, 2);
+              applyStreamBtn.disabled = !lastStreamObj;
+              streamStatus.textContent = 'Completed';
+              try { es.close(); } catch(e){}
+              sid = null;
+              if (etaEl) etaEl.textContent = '';
+            } else if (data.type === 'error') {
+              streamStatus.textContent = `Error: ${data.message}`;
+              try { es.close(); } catch(e){}
+              sid = null;
+              if (etaEl) etaEl.textContent = '';
+            }
+          } catch(e) {}
+        };
+        es.onerror = () => {
+          streamStatus.textContent = 'Connection error';
+          try { es.close(); } catch(e){}
+          sid = null;
+          if (etaEl) etaEl.textContent = '';
+        };
+      }
+  // Preload averages once
+  loadAverages();
+  if (streamBtn) streamBtn.addEventListener('click', startStream);
+      if (streamLink) streamLink.addEventListener('click', (e)=>{ e.preventDefault(); startStream(); });
+      if (streamStopBtn) streamStopBtn.addEventListener('click', async ()=>{
+        if (es) { try { es.close(); } catch(e){} }
+        if (sid) {
+          try {
+            const fd = new FormData(); fd.append('sid', sid);
+            await fetch('/review/stream/cancel', { method: 'POST', body: fd });
+          } catch(e) {}
+          sid = null;
+        }
+        streamStatus.textContent='Stopped';
+        if (etaEl) etaEl.textContent = '';
+      });
+      if (applyStreamBtn) applyStreamBtn.addEventListener('click', ()=>{ if (lastStreamObj) applyResultToForm(lastStreamObj); });
     })();
   </script>
 </body>

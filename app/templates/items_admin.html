@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Items Catalog</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .layout { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; }
+    .panel { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem; }
+    a { text-decoration: none; color: #0366d6; }
+    .muted { color: #666; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #eee; padding: 6px 8px; text-align: left; }
+    th { background: #f9f9f9; }
+  </style>
+</head>
+<body>
+  <h1 style="display:flex; align-items:center; gap:0.75rem;">Items Catalog
+    <a href="/" class="muted" style="margin-left:auto; font-size:0.9rem;">Home</a>
+    <a href="/admin/db" class="muted" style="font-size:0.9rem;">DB Browser</a>
+  </h1>
+  <div class="layout">
+    <div class="panel">
+      <h3 style="margin-top:0;">Abstract Items</h3>
+      <ul style="list-style:none; padding-left:0;">
+        {% for it in items %}
+          <li><a href="/admin/items?abstract_id={{ it.id }}">{{ it.name }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="panel">
+      {% if abstract_id %}
+        <h3 style="margin-top:0;">Variants for #{{ abstract_id }}</h3>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Brand</th><th>Name</th><th>Size</th><th>UPC</th></tr>
+          </thead>
+          <tbody>
+            {% for v in variants %}
+              <tr>
+                <td>{{ v.id }}</td>
+                <td>{{ v.brand }}</td>
+                <td>{{ v.name }}</td>
+                <td>{{ v.size_value }} {{ v.size_unit }}</td>
+                <td>{{ v.upc }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if prices %}
+          <h3>Recent Prices (first variant)</h3>
+          <table>
+            <thead>
+              <tr><th>When</th><th>Merchant</th><th>Price</th><th>Unit Price</th><th>Promo</th></tr>
+            </thead>
+            <tbody>
+              {% for p in prices %}
+                <tr>
+                  <td>{{ p.captured_at }}</td>
+                  <td>{{ p.merchant_name }}</td>
+                  <td>{{ p.price }}</td>
+                  <td>{{ p.unit_price }} {{ p.unit }}</td>
+                  <td>{{ 'yes' if p.promo else 'no' }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      {% else %}
+        <p class="muted">Select an abstract item to view variants and recent prices.</p>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

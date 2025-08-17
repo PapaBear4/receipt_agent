@@ -2,7 +2,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple, cast, List
 from fastapi import FastAPI, UploadFile, File, Form, Request, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -14,12 +14,19 @@ import shutil
 from app.services.ocr import ocr_image, ocr_image_detailed, draw_annotated_overlay
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.image_preproc import crop_receipt, make_receipt_preview
-from app.services.llm import extract_fields_from_text, ollama_health, select_model
+from app.services.llm import extract_fields_from_text, ollama_health, select_model, stream_extract_events, request_cancel
 from app.services.jobs import job_manager, Job
 from app.services.db import init_db
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
-from app.services.db import insert_receipt, insert_line_items, clear_line_items, insert_llm_run, get_llm_stats
+from app.utils import parse_size, normalize_abstract_name, parse_date_to_unix
+from app.services.db import (
+    insert_receipt, insert_line_items, clear_line_items,
+    insert_llm_run, get_llm_stats,
+    list_tables, get_table_columns, get_table_count, get_table_rows,
+    list_abstract_items, list_variants_for_abstract, recent_prices_for_variant,
+    get_line_items_for_receipt, upsert_abstract_item, upsert_item_variant, insert_price_capture, upsert_merchant, get_receipt,
+)
 
 app = FastAPI(title="Receipt Agent MVP")
 
@@ -116,6 +123,76 @@ async def llm_metrics_dashboard(request: Request):
         stats = []
         logger.debug("Failed to load llm stats: %s", e)
     return templates.TemplateResponse("llm_stats.html", {"request": request, "stats": stats})
+
+
+@app.get("/metrics/llm.json")
+async def llm_metrics_json():
+    try:
+        stats = get_llm_stats()
+        return stats
+    except Exception as e:
+        logger.debug("Failed to load llm stats json: %s", e)
+        return []
+
+
+@app.get("/admin/db", response_class=HTMLResponse)
+async def db_browser(request: Request, table: Optional[str] = None, page: int = 1, size: int = 50):
+    try:
+        tables = list_tables()
+    except Exception as e:
+        tables = []
+        logger.debug("list_tables failed: %s", e)
+    if not table and tables:
+        table = tables[0]
+    rows = []
+    cols = []
+    total = 0
+    pages = 1
+    page = max(1, int(page or 1))
+    size = max(1, min(500, int(size or 50)))
+    if table:
+        try:
+            cols = get_table_columns(table)
+            total = get_table_count(table)
+            pages = max(1, (total + size - 1) // size)
+            offset = (page - 1) * size
+            rows = get_table_rows(table, offset, size)
+        except Exception as e:
+            logger.debug("db view error for %s: %s", table, e)
+    ctx = {
+        "request": request,
+        "tables": tables,
+        "table": table or "",
+        "cols": cols,
+        "rows": rows,
+        "page": page,
+        "pages": pages,
+        "size": size,
+        "total": total,
+    }
+    return templates.TemplateResponse("db_browser.html", ctx)
+
+
+@app.get("/admin/items", response_class=HTMLResponse)
+async def admin_items(request: Request, abstract_id: Optional[int] = None):
+    items = list_abstract_items(limit=200)
+    variants = []
+    prices = []
+    if abstract_id:
+        try:
+            variants = list_variants_for_abstract(int(abstract_id))
+            if variants:
+                first_id = variants[0].get("id")
+                vid = None
+                try:
+                    vid = int(first_id) if first_id is not None else None
+                except Exception:
+                    vid = None
+                if vid:
+                    prices = recent_prices_for_variant(vid, limit=20)
+        except Exception as e:
+            logger.debug("Failed loading variants/prices: %s", e)
+    return templates.TemplateResponse("items_admin.html", {"request": request, "items": items, "variants": variants, "abstract_id": abstract_id or 0, "prices": prices})
 
 
 def _build_review_context(
@@ -320,18 +397,57 @@ def _build_review_context(
     return ctx
 
 
-@app.post("/upload")
-async def upload_receipt(request: Request, file: UploadFile = File(...)):
-    # Save upload
-    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-    dest_path = settings.UPLOADS_DIR / filename
-    logger.info("Upload received: %s -> %s", file.filename, dest_path)
-    with dest_path.open("wb") as f:
-        f.write(await file.read())
 
-    ctx = _build_review_context(request, dest_path, file.filename or "upload")
-    logger.info("Rendering review page: image_url=%s annotated=%s", ctx.get("image_url"), bool(ctx.get("annotated_url")))
-    return templates.TemplateResponse("review.html", ctx)
+
+@app.get("/review/stream")
+async def review_stream(request: Request, file: str = Query(..., alias="file"), sid: Optional[str] = Query(None)):
+    """Server-Sent Events stream of LLM extraction for a given uploaded file."""
+    src_path = settings.UPLOADS_DIR / file
+    if not src_path.exists():
+        return HTMLResponse(status_code=404, content=f"File not found: {file}")
+    # Load OCR from cached JSON if present; otherwise run OCR once here (non-streamed)
+    try:
+        stem = Path(file).stem
+        ocr_path = settings.PROCESSED_DIR / f"ocr_{stem}.json"
+        if ocr_path.exists():
+            ocr_doc = json.loads(ocr_path.read_text())
+            ocr_text = ocr_doc.get("text", "")
+            ocr_lines = ocr_doc.get("lines", [])
+        else:
+            import importlib
+            cv2 = importlib.import_module("cv2")
+            img = cv2.imread(str(src_path))
+            detailed = ocr_on_cropped_image(img, debug_basename=stem)
+            ocr_text = detailed.get("text", "")
+            ocr_lines = detailed.get("lines", [])
+    except Exception as e:
+        return HTMLResponse(status_code=500, content=f"OCR load failed: {e}")
+
+    def _sse_gen():
+        for ev in stream_extract_events(ocr_text, ocr_lines, sid=sid):
+            # Persist metrics for streamed runs when completed
+            try:
+                if isinstance(ev, dict) and ev.get("type") == "done":
+                    metrics = ev.get("metrics")
+                    model = ev.get("model")
+                    if metrics:
+                        try:
+                            insert_llm_run(file, model, metrics)  # type: ignore[arg-type]
+                        except Exception as e:
+                            logger.debug("llm_run insert (stream) failed for %s: %s", file, e)
+            except Exception:
+                pass
+            yield f"data: {json.dumps(ev)}\n\n"
+
+    return StreamingResponse(_sse_gen(), media_type="text/event-stream")
+
+
+@app.post("/review/stream/cancel")
+async def review_stream_cancel(sid: Optional[str] = Form(None)):
+    if not sid:
+        return {"ok": False, "error": "missing sid"}
+    request_cancel(str(sid))
+    return {"ok": True}
 
 
 def _load_cached_review_context(request: Request, stored_name: str, original_name: str) -> Optional[Dict[str, object]]:
@@ -696,6 +812,40 @@ async def save_receipt(
                 clear_line_items(rid)
                 n = insert_line_items(rid, items)
                 logger.info("Saved %d line items to DB for receipt id=%s", n, rid)
+                # Auto-seed abstract items, variants, and price captures
+                try:
+                    # Merchant id from DB (upsert again to get id)
+                    mid = upsert_merchant(payee)
+                    # Capture timestamp from normalized date
+                    from app.utils import parse_date_to_unix as _parse_unix
+                    captured_at = _parse_unix(norm_date)
+                    line_rows = get_line_items_for_receipt(rid)
+                    for lr in line_rows:
+                        desc = (lr.get("description") or lr.get("ocr_text") or "").strip()
+                        if not desc:
+                            continue
+                        abstract = normalize_abstract_name(desc)
+                        if not abstract:
+                            continue
+                        aid = upsert_abstract_item(abstract)
+                        # Parse size/unit heuristically
+                        size_v, size_u = parse_size(desc)
+                        vid = upsert_item_variant(aid, name=desc, brand=None, size_value=size_v, size_unit=size_u)
+                        price_amt = None
+                        try:
+                            price_amt = float(lr.get("amount") or 0)
+                        except Exception:
+                            price_amt = None
+                        if vid and mid and (price_amt is not None) and price_amt > 0:
+                            unit_price = None
+                            if size_v and size_v > 0 and size_u:
+                                try:
+                                    unit_price = price_amt / float(size_v)
+                                except Exception:
+                                    unit_price = None
+                            insert_price_capture(vid, mid, price_amt, captured_at or int(datetime.now().timestamp()), receipt_id=rid, line_item_id=int(lr.get("id") or 0), unit_price=unit_price, unit=size_u)
+                except Exception:
+                    logger.debug("Auto-seed items/variants/prices failed for receipt id=%s", rid)
             except Exception:
                 logger.exception("Failed parsing/saving items for receipt id=%s", rid)
         logger.info("Saved receipt to DB: id=%s stored=%s", rid, stored_filename)

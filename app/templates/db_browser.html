@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DB Browser</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .layout { display: grid; grid-template-columns: 220px 1fr; gap: 1rem; }
+    .sidebar { border: 1px solid #ddd; border-radius: 6px; padding: 0.5rem; }
+    .content { border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem; }
+    a { text-decoration: none; color: #0366d6; }
+    a.active { font-weight: 700; color: #111; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #eee; padding: 6px 8px; text-align: left; }
+    th { background: #f9f9f9; }
+    .toolbar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1 style="display:flex; align-items:center; gap:0.75rem;">DB Browser
+    <a href="/" class="muted" style="margin-left:auto; font-size:0.9rem;">Home</a>
+  </h1>
+  <div class="layout">
+    <div class="sidebar">
+      <strong>Tables</strong>
+      <ul style="list-style:none; padding-left: 0;">
+        {% for t in tables %}
+          <li><a href="/admin/db?table={{ t }}" class="{{ 'active' if t == table else '' }}">{{ t }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="content">
+      {% if table %}
+        <div class="toolbar">
+          <div><strong>{{ table }}</strong></div>
+          <div class="muted">Rows: {{ total }} | Page {{ page }} / {{ pages }}</div>
+          <div style="margin-left:auto;">
+            <form method="get" action="/admin/db" style="display:inline-flex; gap:0.25rem; align-items:center;">
+              <input type="hidden" name="table" value="{{ table }}" />
+              <label>Page <input type="number" name="page" value="{{ page }}" min="1" max="{{ pages }}" style="width:5rem;"/></label>
+              <label>Size <input type="number" name="size" value="{{ size }}" min="1" max="500" style="width:5rem;"/></label>
+              <button type="submit">Go</button>
+            </form>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              {% for c in cols %}
+              <th>{{ c.name }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in rows %}
+            <tr>
+              {% for c in cols %}
+              <td>{{ r[c.name] }}</td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No tables found.</p>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

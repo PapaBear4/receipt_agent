@@ -15,26 +15,18 @@
 <body>
   <h1>Receipt Agent</h1>
   <div class="card">
-    <form action="/upload" method="post" enctype="multipart/form-data">
-      <label for="file">Upload a receipt (JPG/PNG):</label><br />
-      <input id="file" name="file" type="file" accept="image/jpeg,image/png" required />
+    <form action="/upload/batch" method="post" enctype="multipart/form-data">
+      <label for="files">Upload receipts (select one or many JPG/PNG):</label><br />
+      <input id="files" name="files" type="file" multiple accept="image/jpeg,image/png" required />
       <div class="actions">
-        <button type="submit">Upload & Extract</button>
+        <button type="submit">Upload</button>
+        <a href="/jobs" style="margin-left: 1rem">Jobs</a>
+        <a href="/processed" style="margin-left: 1rem">Processed</a>
+  <a href="/admin/db" style="margin-left: 1rem">DB Browser</a>
+  <a href="/admin/items" style="margin-left: 1rem">Items Catalog</a>
         <a href="/download/csv" style="margin-left: 1rem">Download CSV</a>
       </div>
-      <p class="note">Single upload. Images are stored locally. CSV is appended on save.</p>
-    </form>
-  </div>
-  <div class="card" style="margin-top: 1rem;">
-    <form action="/upload/batch" method="post" enctype="multipart/form-data">
-      <label for="files">Batch upload (select multiple JPG/PNG):</label><br />
-      <input id="files" name="files" type="file" multiple accept="image/jpeg,image/png" />
-      <div class="actions">
-        <button type="submit">Upload Batch</button>
-  <a href="/jobs" style="margin-left: 1rem">Jobs</a>
-  <a href="/processed" style="margin-left: 1rem">Processed</a>
-      </div>
-      <p class="note">We'll dedupe by file content. You can review each receipt after upload.</p>
+      <p class="note">Uploads are always processed in the background. You can continue browsing while jobs run.</p>
     </form>
   </div>
   <div class="card" style="margin-top: 1rem;">

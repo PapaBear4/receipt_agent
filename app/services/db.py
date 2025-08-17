@@ -131,6 +131,32 @@ CREATE INDEX IF NOT EXISTS idx_item_variants_abstract ON item_variants(abstract_
 CREATE INDEX IF NOT EXISTS idx_price_captures_variant ON price_captures(item_variant_id);
 CREATE INDEX IF NOT EXISTS idx_price_captures_merchant ON price_captures(merchant_id);
 CREATE INDEX IF NOT EXISTS idx_price_captures_captured ON price_captures(captured_at);
+
+-- YNAB: durable mappings and ephemeral suggestions
+CREATE TABLE IF NOT EXISTS ynab_mappings (
+    id INTEGER PRIMARY KEY,
+    budget_id TEXT NOT NULL,
+    kind TEXT NOT NULL,              -- e.g., 'account', 'category', 'payee'
+    key TEXT NOT NULL,               -- e.g., 'card_last4:1234' or 'payee:Walmart'
+    chosen_id TEXT NOT NULL,         -- selected resource id (e.g., account_id)
+    chosen_name TEXT,                -- optional display name
+    updated_at INTEGER NOT NULL,
+    UNIQUE (budget_id, kind, key)
+);
+
+CREATE TABLE IF NOT EXISTS ynab_suggestions (
+    id INTEGER PRIMARY KEY,
+    budget_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    guess_id TEXT,
+    guess_name TEXT,
+    confidence REAL,
+    model TEXT,
+    prompt_hash TEXT,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -163,6 +189,65 @@ def init_db() -> None:
         _ensure_column(conn, "line_items", "confidence", "REAL")
     # Ensure llm_runs table exists (already created by SCHEMA_SQL); add columns if we extend later
         conn.commit()
+
+
+# ---- YNAB mappings & suggestions ----
+def upsert_mapping(budget_id: str, kind: str, key: str, chosen_id: str, chosen_name: str | None = None) -> int:
+    if not budget_id or not kind or not key or not chosen_id:
+        return 0
+    now = int(time.time())
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ynab_mappings(budget_id, kind, key, chosen_id, chosen_name, updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(budget_id, kind, key) DO UPDATE SET
+              chosen_id=excluded.chosen_id,
+              chosen_name=excluded.chosen_name,
+              updated_at=excluded.updated_at
+            """,
+            (budget_id, kind, key, chosen_id, chosen_name, now),
+        )
+        row = conn.execute("SELECT id FROM ynab_mappings WHERE budget_id=? AND kind=? AND key=?", (budget_id, kind, key)).fetchone()
+        conn.commit()
+        return int(row[0]) if row else 0
+
+
+def get_mapping(budget_id: str, kind: str, key: str) -> dict | None:
+    if not budget_id or not kind or not key:
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM ynab_mappings WHERE budget_id=? AND kind=? AND key=?", (budget_id, kind, key)).fetchone()
+        return dict(row) if row else None
+
+
+def set_suggestion(budget_id: str, kind: str, key: str, guess_id: str | None, guess_name: str | None, confidence: float | None, model: str | None, prompt_hash: str | None, ttl_seconds: int = 30 * 24 * 3600) -> int:
+    if not budget_id or not kind or not key:
+        return 0
+    now = int(time.time())
+    exp = now + max(60, int(ttl_seconds or 0))
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO ynab_suggestions(budget_id, kind, key, guess_id, guess_name, confidence, model, prompt_hash, expires_at, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (budget_id, kind, key, guess_id, guess_name, confidence, model, prompt_hash, exp, now),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def get_suggestion(budget_id: str, kind: str, key: str) -> dict | None:
+    if not budget_id or not kind or not key:
+        return None
+    now = int(time.time())
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM ynab_suggestions WHERE budget_id=? AND kind=? AND key=? AND expires_at>? ORDER BY created_at DESC LIMIT 1",
+            (budget_id, kind, key, now),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 # ---- Grocery catalog helpers ----
@@ -526,3 +611,42 @@ def get_llm_stats() -> list[dict]:
             """
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---- Maintenance helpers (dangerous) ----
+def clear_table(table: str) -> int:
+    """Delete all rows from a user table. Returns rows affected (SQLite returns total changes)."""
+    allowed = set(list_tables())
+    if table not in allowed:
+        return 0
+    with _connect() as conn:
+        # Turn off foreign key enforcement during bulk delete to avoid order issues
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF;")
+        except Exception:
+            pass
+        cur = conn.execute(f"DELETE FROM {table}")
+        try:
+            # Best effort: reset AUTOINCREMENT counters when present
+            conn.execute("DELETE FROM sqlite_sequence WHERE name=?", (table,))
+        except Exception:
+            pass
+        conn.commit()
+        try:
+            return int(cur.rowcount if cur.rowcount is not None else 0)
+        except Exception:
+            return 0
+
+
+def clear_all_tables(exclude: list[str] | None = None) -> dict:
+    """Delete all rows from all user tables, optionally excluding some. Returns per-table counts."""
+    excl = set(exclude or [])
+    counts: dict[str, int] = {}
+    for t in list_tables():
+        if t in excl:
+            continue
+        try:
+            counts[t] = clear_table(t)
+        except Exception:
+            counts[t] = 0
+    return counts

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YNAB Settings</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    h1 { display:flex; align-items:center; gap:0.75rem; }
+    .grid { display:grid; grid-template-columns: 1fr; gap:1rem; }
+    .card { border:1px solid #ddd; border-radius:8px; padding:1rem; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { border-bottom:1px solid #eee; padding:6px 8px; text-align:left; }
+    .muted { color:#666; }
+    .error { color:#900; background:#fee; border:1px solid #f99; padding:0.5rem; border-radius:6px; }
+    code { background:#f7f7f7; padding:0 0.25rem; border-radius:4px; }
+    select { padding: 0.4rem; }
+  </style>
+</head>
+<body>
+  <h1>YNAB Settings <a href="/" class="muted" style="margin-left:auto; font-size:0.9rem;">Home</a></h1>
+
+  {% if not configured %}
+    <div class="error">YNAB not configured. Set <code>YNAB_TOKEN</code> and reload.</div>
+  {% endif %}
+
+  <div class="grid">
+    <div class="card">
+      <h2 style="margin-top:0;">Budget</h2>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <form action="/settings/ynab" method="post" style="display:flex; gap:0.5rem; align-items:center;">
+        <label for="budget_id">Select budget:</label>
+        <select id="budget_id" name="budget_id">
+          {% for b in budgets %}
+          <option value="{{ b.id }}" {% if b.id == selected_budget_id %}selected{% endif %}>{{ b.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Save</button>
+        <span class="muted">Current: <code>{{ selected_budget_id }}</code></span>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0;">Accounts (for selected budget)</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>On Budget</th><th>Closed</th></tr></thead>
+        <tbody>
+          {% for a in accounts %}
+          <tr>
+            <td><code>{{ a.id }}</code></td>
+            <td>{{ a.name }}</td>
+            <td>{{ a.type }}</td>
+            <td>{{ 'yes' if a.on_budget else 'no' }}</td>
+            <td>{{ 'yes' if a.closed else 'no' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0;">Categories (for selected budget)</h2>
+      {% for g in category_groups %}
+      <h3 style="margin-bottom:0.25rem;">{{ g.name }}</h3>
+      <table style="margin-bottom:1rem;">
+        <thead><tr><th>ID</th><th>Name</th></tr></thead>
+        <tbody>
+          {% for c in g.categories %}
+          <tr>
+            <td><code>{{ c.id }}</code></td>
+            <td>{{ c.name }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endfor %}
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0;">Payees (for selected budget)</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th></tr></thead>
+        <tbody>
+          {% for p in payees %}
+          <tr>
+            <td><code>{{ p.id }}</code></td>
+            <td>{{ p.name }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

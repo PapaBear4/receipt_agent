@@ -125,7 +125,7 @@
   </div>
   {% endif %}
   <p>
-    <a href="/review?file={{ stored_filename }}&rerun=1" title="Re-run OCR and LLM ignoring cache">Re-process</a>
+    <a href="/review?file={{ stored_filename }}&rerun=1" title="Queue background job to re-run OCR and LLM (ignores cache)">Re-process (background)</a>
   &nbsp;|&nbsp;
   <a href="#" id="streamLink" title="Stream LLM output live">Live Re-process (stream)</a>
   </p>
@@ -160,6 +160,22 @@
           <label for="memo">Memo</label>
           <input id="memo" name="memo" type="text" value="{{ memo }}" required />
         </div>
+  <h3>YNAB</h3>
+  <div class="field">
+    <label for="ynab_account_id">Account ID
+      {% if suggestions and suggestions.account_id %}
+        <span style="font-weight:normal; color:#555;">(suggested: {{ suggestions.account_name or suggestions.account_id }})</span>
+      {% endif %}
+    </label>
+    <input id="ynab_account_id" type="text" value="{{ (suggestions.account_id if suggestions and suggestions.account_id else (config.YNAB_DEFAULT_ACCOUNT_ID if config and config.YNAB_DEFAULT_ACCOUNT_ID else '')) }}" />
+  </div>
+  {% if payment and payment.last4 %}
+  <div class="field">
+    <button type="button" id="saveAcctDefaultBtn" title="Remember this account for card {{ payment.last4 }}">Save as default for card ••••{{ payment.last4 }}</button>
+    <span id="saveAcctDefaultStatus" class="muted" style="margin-left:0.5rem;"></span>
+  </div>
+  {% endif %}
+  <div class="field"><label for="ynab_category_id">Category ID</label><input id="ynab_category_id" type="text" /></div>
         <h3>Payment Details</h3>
         <div class="field"><label>Subtotal</label><input name="subtotal" type="text" value="{{ payment.subtotal if payment else '' }}" /></div>
         <div class="field"><label>Tax</label><input name="tax" type="text" value="{{ payment.tax if payment else '' }}" /></div>
@@ -198,6 +214,8 @@
         <div class="actions">
           <button type="submit">Save</button>
           <a href="/">Cancel</a>
+          <button type="button" id="ynabBtn" style="margin-left:0.5rem;">Send to YNAB</button>
+          <span id="ynabStatus" class="muted" style="margin-left:0.5rem;"></span>
         </div>
       </form>
     </div>
@@ -229,6 +247,10 @@
   let sid = null;
   let avgTpsCache = null;
   let avgWallCache = null;
+  const ynabBtn = document.getElementById('ynabBtn');
+  const ynabStatus = document.getElementById('ynabStatus');
+  const saveAcctDefaultBtn = document.getElementById('saveAcctDefaultBtn');
+  const saveAcctDefaultStatus = document.getElementById('saveAcctDefaultStatus');
   // Server-provided hints via data-* attributes
   const autoStream = (document.body && document.body.dataset && document.body.dataset.autoStream === '1');
   const ocrLineCount = parseInt((document.body && document.body.dataset && document.body.dataset.ocrLines) || '0', 10) || 0;
@@ -416,6 +438,28 @@
       });
       if (applyStreamBtn) applyStreamBtn.addEventListener('click', ()=>{ if (lastStreamObj) applyResultToForm(lastStreamObj); });
 
+      // YNAB push
+      if (ynabBtn) ynabBtn.addEventListener('click', async ()=>{
+        try {
+          ynabStatus.textContent = 'Sending…';
+          const fd = new FormData();
+          const stored = document.querySelector('input[name="stored_filename"]').value;
+          fd.append('stored_filename', stored);
+          fd.append('date', (document.getElementById('date')?.value||''));
+          fd.append('payee', (document.getElementById('payee')?.value||''));
+          fd.append('outflow', (document.getElementById('outflow')?.value||''));
+          fd.append('memo', (document.getElementById('memo')?.value||''));
+          // Optional account/category: basic inputs if present
+          const acc = document.getElementById('ynab_account_id');
+          const cat = document.getElementById('ynab_category_id');
+          if (acc && acc.value) fd.append('account_id', acc.value);
+          if (cat && cat.value) fd.append('category_id', cat.value);
+          const r = await fetch('/ynab/push', { method: 'POST', body: fd });
+          const j = await r.json();
+          ynabStatus.textContent = j.ok ? 'Sent ✓' : ('Error: '+(j.error||'failed'));
+        } catch(e){ ynabStatus.textContent = 'Error sending'; }
+      });
+
       // Auto-start streaming when the OCR is long
       try {
         if (autoStream === true || autoStream === 'true' || (typeof autoStream === 'boolean' && autoStream)) {
@@ -428,6 +472,21 @@
           if (streamStatus) streamStatus.textContent = 'Auto-started (long OCR)';
         }
       } catch(e) {}
+
+      // Save durable mapping for account by last4
+      if (saveAcctDefaultBtn) saveAcctDefaultBtn.addEventListener('click', async ()=>{
+        try {
+          const acct = document.getElementById('ynab_account_id');
+          const last4El = document.querySelector('[name="last4"]');
+          const last4 = last4El ? (last4El.value||'').trim() : '';
+          const acctId = acct ? (acct.value||'').trim() : '';
+          if (!last4 || !acctId) { saveAcctDefaultStatus.textContent = 'Missing last4 or account id'; return; }
+          saveAcctDefaultStatus.textContent = 'Saving…';
+          const fd = new FormData(); fd.append('key_last4', last4); fd.append('chosen_id', acctId);
+          await fetch('/ynab/mapping/account', { method: 'POST', body: fd });
+          saveAcctDefaultStatus.textContent = 'Saved ✓';
+        } catch(e){ saveAcctDefaultStatus.textContent = 'Error saving'; }
+      });
     })();
   </script>
 </body>

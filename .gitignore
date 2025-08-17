@@ -1,4 +1,15 @@
-# Python bytecode
+# Local secrets and env files
+.env
+data/secrets.env
+ENV_FILE
+
+# Python/Build
+__pycache__/
+*.pyc
+data/logs/
+data/uploads/*
+data/processed/*
+!data/.gitkeep# Python bytecode
 __pycache__/
 *.py[cod]
 *$py.class

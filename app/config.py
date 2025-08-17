@@ -2,6 +2,40 @@ import os
 from pathlib import Path
 
 
+def _load_env_from_files() -> None:
+    """Load key=value lines from optional local files into os.environ if not already set.
+    Priority: repo/.env, ENV_FILE path, data/secrets.env.
+    Comments (#) and blank lines are ignored. Does not override existing env vars.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / ".env",
+        Path(os.getenv("ENV_FILE", "")) if os.getenv("ENV_FILE") else None,
+        repo_root / "data" / "secrets.env",
+    ]
+    for p in [c for c in candidates if c]:
+        try:
+            if p.exists() and p.is_file():
+                for line in p.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and (k not in os.environ):
+                        os.environ[k] = v
+        except Exception:
+            # Best-effort; ignore parse errors
+            pass
+
+
+# Load local env before reading values into Settings
+_load_env_from_files()
+
+
 class Settings:
     # Networking
     APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
@@ -57,6 +91,12 @@ class Settings:
 
     # Debugging
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
+
+    # YNAB API
+    YNAB_API_BASE: str = os.getenv("YNAB_API_BASE", "https://api.ynab.com/v1")
+    YNAB_TOKEN: str | None = os.getenv("YNAB_TOKEN")
+    YNAB_BUDGET_ID: str | None = os.getenv("YNAB_BUDGET_ID")
+    YNAB_DEFAULT_ACCOUNT_ID: str | None = os.getenv("YNAB_DEFAULT_ACCOUNT_ID")
 
     # Receipt detection and OCR tuning (env overridable)
     # Tip: export these before `python run.py` to experiment, e.g.:

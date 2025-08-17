@@ -28,6 +28,8 @@ class Job:
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    # When true, recompute artifacts even if they already exist
+    force: bool = False
 
 
 class JobManager:
@@ -97,8 +99,8 @@ class JobManager:
         fields_path = settings.PROCESSED_DIR / f"fields_{stem}.json"
         overlay_path = settings.PROCESSED_DIR / f"overlay_{stem}.jpg"
         ocr_json_path = settings.PROCESSED_DIR / f"ocr_{stem}.json"
-        if fields_path.exists() and overlay_path.exists() and ocr_json_path.exists():
-            logger.info("Artifacts already exist for %s; skipping processing", job.stored_name)
+        if (fields_path.exists() and overlay_path.exists() and ocr_json_path.exists()) and not job.force:
+            logger.info("Artifacts already exist for %s; skipping processing (force=%s)", job.stored_name, job.force)
             return
 
         # Run OCR

@@ -22,6 +22,12 @@
   <h1 style="display:flex; align-items:center; gap:0.75rem;">DB Browser
     <a href="/" class="muted" style="margin-left:auto; font-size:0.9rem;">Home</a>
   </h1>
+  <div style="margin:0.5rem 0 1rem; display:flex; gap:0.5rem;">
+    <form action="/admin/db/clear" method="post" onsubmit="return confirm('This will delete ALL rows from ALL tables. Continue?')">
+      <input type="hidden" name="confirm" value="yes" />
+      <button type="submit" style="background:#fee;color:#900;border:1px solid #f99;">Clear ALL Tables</button>
+    </form>
+  </div>
   <div class="layout">
     <div class="sidebar">
       <strong>Tables</strong>
@@ -42,6 +48,10 @@
               <label>Page <input type="number" name="page" value="{{ page }}" min="1" max="{{ pages }}" style="width:5rem;"/></label>
               <label>Size <input type="number" name="size" value="{{ size }}" min="1" max="500" style="width:5rem;"/></label>
               <button type="submit">Go</button>
+            </form>
+            <form method="post" action="/admin/db/clear_table" style="display:inline-flex; margin-left:0.5rem;" onsubmit="return confirm('Delete ALL rows from table {{ table }}?')">
+              <input type="hidden" name="table" value="{{ table }}" />
+              <button type="submit" style="background:#fff4e5;color:#8a4b00;border:1px solid #f3b982;">Clear Table</button>
             </form>
           </div>
         </div>

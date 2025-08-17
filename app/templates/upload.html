@@ -26,8 +26,17 @@
   <a href="/admin/items" style="margin-left: 1rem">Items Catalog</a>
   <a href="/docs/flow" style="margin-left: 1rem">Flow Map</a>
         <a href="/download/csv" style="margin-left: 1rem">Download CSV</a>
+  <a href="/settings/ynab" style="margin-left: 1rem">YNAB Settings</a>
       </div>
       <p class="note">Uploads are always processed in the background. You can continue browsing while jobs run.</p>
+    </form>
+  </div>
+  <div class="card" style="margin-top: 1rem;">
+    <form action="/admin/db/clear" method="post" onsubmit="return confirm('This will delete ALL rows from ALL tables. Continue?')">
+      <div class="actions">
+        <button type="submit" style="background:#fee;color:#900;border:1px solid #f99;">Clear DB (All Tables)</button>
+      </div>
+      <p class="note">This only clears the database rows. Files and CSV are unchanged.</p>
     </form>
   </div>
   <div class="card" style="margin-top: 1rem;">

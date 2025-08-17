@@ -17,6 +17,7 @@ from app.services.image_preproc import crop_receipt, make_receipt_preview
 from app.services.llm import extract_fields_from_text, ollama_health, stream_extract_events, request_cancel
 from app.services.jobs import job_manager, Job
 from app.services.db import init_db
+from app.services.ynab import YNABClient
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
 from app.utils import parse_size, normalize_abstract_name, parse_date_to_unix
@@ -26,6 +27,7 @@ from app.services.db import (
     list_tables, get_table_columns, get_table_count, get_table_rows,
     list_abstract_items, list_variants_for_abstract, recent_prices_for_variant,
     get_line_items_for_receipt, upsert_abstract_item, upsert_item_variant, insert_price_capture, upsert_merchant, get_receipt,
+    get_mapping, upsert_mapping, clear_table, clear_all_tables,
 )
 
 app = FastAPI(title="Receipt Agent MVP")
@@ -41,6 +43,22 @@ else:
 app.mount("/data", StaticFiles(directory=str(settings.DATA_DIR)), name="data")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
+
+def _load_user_conf() -> dict:
+    try:
+        if USER_CONF_PATH.exists():
+            return json.loads(USER_CONF_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_user_conf(d: dict) -> None:
+    try:
+        USER_CONF_PATH.write_text(json.dumps(d, indent=2))
+    except Exception:
+        pass
+
 
 csv_writer = CSVWriter(settings.CSV_PATH)
 
@@ -124,6 +142,180 @@ async def llm_metrics_dashboard(request: Request):
     return templates.TemplateResponse("llm_stats.html", {"request": request, "stats": stats})
 
 
+@app.get("/ynab/meta", response_class=HTMLResponse)
+async def ynab_meta(request: Request):
+    client = YNABClient()
+    ctx: Dict[str, object] = {"request": request, "configured": client.is_configured(), "budget_id": settings.YNAB_BUDGET_ID or "", "default_account_id": settings.YNAB_DEFAULT_ACCOUNT_ID or ""}
+    if not client.is_configured():
+        ctx["error"] = "YNAB_TOKEN missing"
+        return templates.TemplateResponse("ynab_meta.html", ctx)
+    budgets = []
+    accounts = []
+    category_groups = []
+    err_b = err_a = err_c = None
+    try:
+        budgets = client.budgets().get("budgets", [])
+    except Exception as e:
+        err_b = str(e)
+    bid = settings.YNAB_BUDGET_ID
+    if not bid and budgets:
+        try:
+            bid = budgets[0].get("id")
+        except Exception:
+            bid = None
+    if bid:
+        try:
+            accounts = client.accounts(str(bid)).get("accounts", [])
+        except Exception as e:
+            err_a = str(e)
+        try:
+            category_groups = client.categories(str(bid)).get("category_groups", [])
+        except Exception as e:
+            err_c = str(e)
+    ctx.update({
+        "budgets": budgets,
+        "accounts": accounts,
+        "category_groups": category_groups,
+        "error_budgets": err_b,
+        "error_accounts": err_a,
+        "error_categories": err_c,
+        "active_budget_id": bid or "",
+    })
+    return templates.TemplateResponse("ynab_meta.html", ctx)
+
+
+@app.get("/ynab/meta.json")
+async def ynab_meta_json():
+    client = YNABClient()
+    if not client.is_configured():
+        return {"configured": False, "error": "YNAB_TOKEN missing"}
+    out: Dict[str, object] = {"configured": True}
+    try:
+        out["budgets"] = client.budgets().get("budgets", [])
+    except Exception as e:
+        out["error_budgets"] = str(e)
+    budgets_list = out.get("budgets") or []
+    bid = settings.YNAB_BUDGET_ID
+    if not bid and isinstance(budgets_list, list) and budgets_list:
+        try:
+            bid = budgets_list[0].get("id")
+        except Exception:
+            bid = None
+    if bid:
+        try:
+            out["accounts"] = client.accounts(str(bid)).get("accounts", [])
+        except Exception as e:
+            out["error_accounts"] = str(e)
+        try:
+            out["categories"] = client.categories(str(bid)).get("category_groups", [])
+        except Exception as e:
+            out["error_categories"] = str(e)
+    out["active_budget_id"] = bid or ""
+    out["default_account_id"] = settings.YNAB_DEFAULT_ACCOUNT_ID or ""
+    return out
+
+
+@app.get("/settings/ynab", response_class=HTMLResponse)
+async def settings_ynab(request: Request):
+    client = YNABClient()
+    conf = _load_user_conf()
+    ctx: Dict[str, object] = {"request": request, "configured": client.is_configured(), "user_conf": conf}
+    budgets = []
+    err = None
+    try:
+        budgets = client.budgets().get("budgets", [])
+    except Exception as e:
+        err = str(e)
+    sel = conf.get("ynab_budget_id") or settings.YNAB_BUDGET_ID or (budgets[0].get("id") if budgets else "")
+    accounts = []
+    category_groups = []
+    payees = []
+    if sel:
+        try:
+            accounts = client.accounts(sel).get("accounts", [])
+            # Hide closed accounts
+            accounts = [a for a in accounts if not a.get("closed")]
+        except Exception:
+            accounts = []
+        try:
+            category_groups = client.categories(sel).get("category_groups", [])
+            # Hide hidden/deleted groups and categories
+            filtered_groups = []
+            for g in category_groups or []:
+                if g.get("hidden"):
+                    continue
+                cats = [c for c in (g.get("categories") or []) if not c.get("hidden") and not c.get("deleted")]
+                if cats:
+                    ng = dict(g)
+                    ng["categories"] = cats
+                    filtered_groups.append(ng)
+            category_groups = filtered_groups
+        except Exception:
+            category_groups = []
+        try:
+            payees = client.payees(sel).get("payees", [])
+        except Exception:
+            payees = []
+    ctx.update({
+        "budgets": budgets,
+        "selected_budget_id": sel,
+        "accounts": accounts,
+        "category_groups": category_groups,
+        "payees": payees,
+        "error": err,
+    })
+    return templates.TemplateResponse("settings_ynab.html", ctx)
+
+
+@app.post("/settings/ynab")
+async def settings_ynab_save(budget_id: str = Form("")):
+    conf = _load_user_conf()
+    conf["ynab_budget_id"] = budget_id
+    _save_user_conf(conf)
+    return RedirectResponse(url="/settings/ynab", status_code=303)
+
+
+@app.post("/ynab/push")
+async def ynab_push(
+    stored_filename: str = Form(...),
+    date: str = Form(...),
+    payee: str = Form(""),
+    outflow: str = Form(...),
+    memo: str = Form(""),
+    account_id: str = Form("") ,
+    category_id: str = Form("") ,
+):
+    client = YNABClient()
+    if not client.is_configured():
+        return {"ok": False, "error": "YNAB not configured"}
+    bid = _load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID
+    if not bid:
+        return {"ok": False, "error": "YNAB_BUDGET_ID not set"}
+    acc = account_id or (settings.YNAB_DEFAULT_ACCOUNT_ID or "")
+    if not acc:
+        return {"ok": False, "error": "account_id required"}
+    try:
+        amt = float(outflow)
+    except Exception:
+        return {"ok": False, "error": "invalid amount"}
+    try:
+        iid = YNABClient.make_import_id(date, amt, stored_filename)
+        data = client.create_transaction(
+            bid,
+            acc,
+            date=date,
+            amount=amt,
+            payee_name=payee,
+            memo=memo,
+            category_id=(category_id or None),
+            import_id=iid,
+        )
+        tx = (data.get("transaction") or {}) if isinstance(data, dict) else {}
+        return {"ok": True, "transaction": tx}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/metrics/llm.json")
 async def llm_metrics_json():
     try:
@@ -170,6 +362,26 @@ async def db_browser(request: Request, table: Optional[str] = None, page: int = 
         "total": total,
     }
     return templates.TemplateResponse("db_browser.html", ctx)
+
+
+@app.post("/admin/db/clear")
+async def db_clear_all(confirm: str = Form("")):
+    if confirm != "yes":
+        return RedirectResponse(url="/admin/db", status_code=303)
+    # Exclude sqlite internal tables (already filtered) and nothing else by default
+    _ = clear_all_tables()
+    return RedirectResponse(url="/admin/db", status_code=303)
+
+
+@app.post("/admin/db/clear_table")
+async def db_clear_table(table: str = Form(...)):
+    if not table:
+        return RedirectResponse(url="/admin/db", status_code=303)
+    try:
+        clear_table(table)
+    except Exception:
+        pass
+    return RedirectResponse(url=f"/admin/db?table={table}", status_code=303)
 
 
 @app.get("/admin/items", response_class=HTMLResponse)
@@ -406,6 +618,8 @@ def _build_review_context(
         "used_model": used_model,
         "debug": settings.DEBUG,
     "auto_stream": auto_stream,
+    "config": settings,
+    "suggestions": {},
     }
     return ctx
 
@@ -546,6 +760,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
             "metrics": metrics,
             "debug": settings.DEBUG,
             "auto_stream": auto_stream,
+            "config": settings,
         }
     except Exception as e:
         if settings.DEBUG:
@@ -567,17 +782,77 @@ async def review_existing(request: Request, file: str = Query(..., alias="file")
     except Exception:
         original = file
     if rerun:
-        # Recompute artifacts once, then redirect to avoid repeated reruns on refresh
-        _ = _build_review_context(request, src_path, original)
-        return RedirectResponse(url=f"/review?file={file}", status_code=303)
+        # Enqueue a background re-process job with force=true, then redirect
+        jid = f"job_reprocess_{file}"
+        job_manager.enqueue(Job(id=jid, stored_name=file, original_name=original, force=True))
+        return RedirectResponse(url=f"/jobs", status_code=303)
     # Cache-first path
     cached = _load_cached_review_context(request, file, original)
     if cached:
+        # Attach mapping suggestion for account by card_last4 if available
+        try:
+            budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
+            last4 = ""
+            if isinstance(cached, dict):
+                pay_obj = cached.get("payment")
+                if isinstance(pay_obj, dict):
+                    try:
+                        last4 = str(pay_obj.get("last4") or "").strip()
+                    except Exception:
+                        last4 = ""
+            sugg = {}
+            if budget_id and last4:
+                m = get_mapping(budget_id, "account", f"card_last4:{last4}")
+                if m:
+                    sugg["account_id"] = m.get("chosen_id")
+                    sugg["account_name"] = m.get("chosen_name")
+            cached["suggestions"] = sugg
+        except Exception:
+            cached["suggestions"] = {}
         return templates.TemplateResponse("review.html", cached)
     # Fallback: build now if cache missing
     ctx = _build_review_context(request, src_path, original)
+    # Attach mapping suggestion for account by card_last4 if available
+    try:
+        budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
+        last4 = ""
+        if isinstance(ctx, dict):
+            pay_obj2 = ctx.get("payment")
+            if isinstance(pay_obj2, dict):
+                try:
+                    last4 = str(pay_obj2.get("last4") or "").strip()
+                except Exception:
+                    last4 = ""
+        sugg = {}
+        if budget_id and last4:
+            m = get_mapping(budget_id, "account", f"card_last4:{last4}")
+            if m:
+                sugg["account_id"] = m.get("chosen_id")
+                sugg["account_name"] = m.get("chosen_name")
+        ctx["suggestions"] = sugg
+    except Exception:
+        ctx["suggestions"] = {}
     logger.info("Rendering review page for existing upload: %s", file)
     return templates.TemplateResponse("review.html", ctx)
+
+
+@app.post("/ynab/mapping/account")
+async def ynab_save_account_mapping(
+    key_last4: str = Form(...),
+    chosen_id: str = Form(...),
+    chosen_name: str = Form("")
+):
+    budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
+    if not budget_id:
+        return {"ok": False, "error": "no budget selected"}
+    if not key_last4 or not chosen_id:
+        return {"ok": False, "error": "missing inputs"}
+    key = f"card_last4:{key_last4.strip()}"
+    try:
+        _ = upsert_mapping(budget_id, "account", key, chosen_id.strip(), (chosen_name or "").strip())
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/upload/batch", response_class=HTMLResponse)

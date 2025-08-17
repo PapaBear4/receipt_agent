@@ -11,10 +11,10 @@ import logging
 import json
 import hashlib
 import shutil
-from app.services.ocr import ocr_image, ocr_image_detailed, draw_annotated_overlay
+from app.services.ocr import ocr_image
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.image_preproc import crop_receipt, make_receipt_preview
-from app.services.llm import extract_fields_from_text, ollama_health, select_model, stream_extract_events, request_cancel
+from app.services.llm import extract_fields_from_text, ollama_health, stream_extract_events, request_cancel
 from app.services.jobs import job_manager, Job
 from app.services.db import init_db
 from app.utils.csv_writer import CSVWriter
@@ -95,9 +95,8 @@ async def health():
 @app.get("/health/llm")
 async def health_llm():
     info = ollama_health()
-    # Also report the model that would actually be used (with fallback selection)
-    model_value = str(info.get("model", ""))
-    info["used_model"] = select_model(model_value)
+    # Report configured model
+    info["used_model"] = settings.OLLAMA_MODEL
     # Log concise summary
     logger.info(
         "LLM health: endpoint_ok=%s model_ok=%s model=%s",
@@ -110,7 +109,7 @@ async def health_llm():
 
 @app.get("/health/llm/test")
 async def health_llm_test(q: str = "Walmart 06/09/2025 Total $14.23"):
-    used_model = select_model()
+    used_model = settings.OLLAMA_MODEL
     fields = extract_fields_from_text(q)
     return {"model": used_model, "fields": fields}
 
@@ -237,18 +236,31 @@ def _build_review_context(
         raw_text = ""
         detailed = None
 
-    # LLM extraction
-    logger.info("Starting LLM field extraction")
-    fields = extract_fields_from_text(raw_text, detailed.get("lines", []) if detailed else None)
-    used_model = select_model()
-    if settings.DEBUG:
-        logger.debug("LLM fields: keys=%s", list(fields.keys()))
-    # Persist an llm_run telemetry row
+    # Decide whether to auto-stream based on OCR line count
+    used_model = settings.OLLAMA_MODEL
+    ocr_lines_for_model = detailed.get("lines", []) if detailed else []
+    auto_stream = False
     try:
-        if fields.get("metrics"):
-            insert_llm_run(filename, used_model, fields["metrics"])  # type: ignore[arg-type]
-    except Exception as e:
-        logger.debug("Failed to insert llm_run: %s", e)
+        auto_stream = len(ocr_lines_for_model) > int(settings.LLM_STREAM_THRESHOLD_LINES)
+    except Exception:
+        auto_stream = False
+
+    # LLM extraction (skip non-stream call when auto_stream is true)
+    if auto_stream:
+        logger.info("Skipping non-stream LLM extraction due to long OCR (%d lines > %d)",
+                    len(ocr_lines_for_model), int(settings.LLM_STREAM_THRESHOLD_LINES))
+        fields = {"payment": {}, "items": []}
+    else:
+        logger.info("Starting LLM field extraction")
+        fields = extract_fields_from_text(raw_text, ocr_lines_for_model)
+        if settings.DEBUG:
+            logger.debug("LLM fields: keys=%s", list(fields.keys()))
+        # Persist an llm_run telemetry row
+        try:
+            if fields.get("metrics"):
+                insert_llm_run(filename, used_model, fields["metrics"])  # type: ignore[arg-type]
+        except Exception as e:
+            logger.debug("Failed to insert llm_run: %s", e)
 
     # Defaults for review form
     date_val = normalize_date_to_mmddyyyy(fields.get("date", ""))
@@ -393,6 +405,7 @@ def _build_review_context(
         "ocr_lines": lines,
         "used_model": used_model,
         "debug": settings.DEBUG,
+    "auto_stream": auto_stream,
     }
     return ctx
 
@@ -500,6 +513,14 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
                 return ""
         assoc_csv = {k: lid_to_csv(v) for k, v in associated_lines.items()}
 
+        # Auto-stream hint based on OCR line count
+        auto_stream = False
+        try:
+            if isinstance(lines, list):
+                auto_stream = len(lines) > int(settings.LLM_STREAM_THRESHOLD_LINES)
+        except Exception:
+            auto_stream = False
+
         return {
             "request": request,
             "image_url": f"/data/uploads/{stored_name}",
@@ -524,6 +545,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
             "used_model": used_model,
             "metrics": metrics,
             "debug": settings.DEBUG,
+            "auto_stream": auto_stream,
         }
     except Exception as e:
         if settings.DEBUG:
@@ -861,4 +883,10 @@ async def save_receipt(
 async def download_csv():
     logger.info("CSV download requested: %s", settings.CSV_PATH)
     return FileResponse(str(settings.CSV_PATH), media_type="text/csv", filename="ynab_receipts.csv")
+
+
+@app.get("/docs/flow", response_class=HTMLResponse)
+async def docs_flow(request: Request):
+    """Render a page that explains the end-to-end data flow and key functions."""
+    return templates.TemplateResponse("flow.html", {"request": request})
 

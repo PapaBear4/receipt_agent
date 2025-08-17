@@ -1,7 +1,7 @@
 import json
 import time
 import requests
-from typing import Dict, Optional, Tuple, List, Any
+from typing import Dict, Optional, List, Any
 import logging
 
 from app.config import settings
@@ -99,57 +99,13 @@ def ollama_health() -> Dict[str, object]:
         info["available_models"] = sorted([n for n in names if n])
         if settings.OLLAMA_MODEL in names:
             info["model_ok"] = True
-        # Suggest a fallback model if preferred isn't available
-        info["suggested_model"] = _select_model_internal(settings.OLLAMA_MODEL, info.get("available_models", []))
         info["ok"] = bool(info["endpoint_ok"] and info["model_ok"])
     except Exception as e:
         info["error"] = str(e)
     return info
 
+from typing import Any
 
-from typing import Any, Iterable
-
-
-def _select_model_internal(preferred: str, available_models: Any) -> str:
-    try:
-        names = list(available_models or [])  # type: ignore[arg-type]
-    except Exception:
-        names = []
-    if preferred and preferred in names:
-        return preferred
-    # Prefer any llama3.* instruct model
-    for n in names:
-        s = str(n)
-        if "llama3" in s and "instruct" in s:
-            return s
-    # Otherwise prefer any instruct model
-    for n in names:
-        if "instruct" in str(n):
-            return str(n)
-    # Fallback to first available
-    return names[0] if names else preferred
-
-
-def select_model(preferred: str | None = None) -> str:
-    """Return a usable model name. If preferred isn't available, choose a reasonable fallback."""
-    preferred = preferred or settings.OLLAMA_MODEL
-    info = ollama_health()
-    available = info.get("available_models", [])
-    return _select_model_internal(preferred, available)
-
-
-def ollama_pull(model: str, stream: bool = False) -> Dict[str, object]:
-    """Request Ollama to pull a model. Returns result dict or error."""
-    try:
-        url = f"{settings.OLLAMA_ENDPOINT}/api/pull"
-        payload = {"name": model, "stream": stream}
-        r = requests.post(url, json=payload, timeout=max(settings.OLLAMA_TIMEOUT, 60))
-        r.raise_for_status()
-        # When stream=False, Ollama returns a final JSON object
-        return {"ok": True, "result": r.json()}
-    except Exception as e:
-        logging.error("Failed to pull model '%s': %s", model, e)
-        return {"ok": False, "error": str(e)}
 
 
 def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None) -> Dict:
@@ -190,9 +146,8 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         else:
             ocr_snippet = ocr_clean
 
-        used_model = select_model(settings.OLLAMA_MODEL)
-        if used_model != settings.OLLAMA_MODEL:
-            logging.warning("Configured model '%s' not available; using fallback '%s'", settings.OLLAMA_MODEL, used_model)
+        # Strict: use configured model directly
+        used_model = settings.OLLAMA_MODEL
 
         # Prepare OCR lines block with indices for line correlation
         lines_block = ""
@@ -387,9 +342,8 @@ def _prepare_prompt(ocr_text: str, ocr_lines: Optional[List[str]] = None) -> Dic
         ocr_snippet = ocr_clean[:max_chars]
     else:
         ocr_snippet = ocr_clean
-    used_model = select_model(settings.OLLAMA_MODEL)
-    if used_model != settings.OLLAMA_MODEL:
-        logging.warning("Configured model '%s' not available; using fallback '%s'", settings.OLLAMA_MODEL, used_model)
+    # Strict: use configured model directly
+    used_model = settings.OLLAMA_MODEL
     lines_block = ""
     max_lines = int(getattr(settings, "LLM_MAX_LINES", 250))
     include_full_text = bool(getattr(settings, "LLM_INCLUDE_FULL_TEXT", True))

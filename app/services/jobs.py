@@ -11,7 +11,7 @@ import logging
 
 from app.config import settings
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
-from app.services.llm import extract_fields_from_text, select_model
+from app.services.llm import extract_fields_from_text
 from app.services.db import insert_llm_run
 
 
@@ -113,7 +113,7 @@ class JobManager:
 
         # LLM extraction
         fields = extract_fields_from_text(raw_text, detailed.get("lines", []))
-        used_model = select_model()
+        used_model = settings.OLLAMA_MODEL
         try:
             if fields.get("metrics"):
                 insert_llm_run(job.stored_name, used_model, fields["metrics"])  # type: ignore[arg-type]

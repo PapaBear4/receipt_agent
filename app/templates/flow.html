@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Flow & Function Map</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; }
+    h2 { margin: 0.25rem 0 0.75rem; }
+    code { background: #f7f7f7; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    ul { margin: 0.25rem 0 0.75rem 1.25rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1 style="display:flex; align-items:center; gap:0.75rem;">Data Flow & Function Map
+    <a href="/" class="muted" style="margin-left:auto; font-size:0.9rem;">Home</a>
+  </h1>
+  <div class="grid">
+    <div class="card">
+      <h2>Interactive Diagram</h2>
+      <div class="muted" style="margin-bottom:0.5rem;">Click nodes to open the corresponding page where applicable.</div>
+  <div class="mermaid">
+flowchart TD
+  A[Upload] --> B[Queue + Save]
+  B --> C{Review existing}
+  C -->|cache hit| D[Load cached]
+  C -->|rerun or miss| E[OCR → JSON + Overlay]
+  E --> X{Long OCR}
+  X -->|no| F1[LLM non‑stream → Fields]
+  X -->|yes| F2[LLM stream → Fields]
+  F1 --> G[Persist metrics]
+  F2 --> G
+  D --> H[Review]
+  F1 --> H
+  F2 --> H
+  H --> I[Save]
+  I --> J[CSV append]
+  I --> K[DB persist]
+  I --> L[Catalog seed]
+  K --> M[DB Browser]
+  L --> N[Items Catalog]
+  G --> O[LLM Metrics]
+  J --> P[Download CSV]
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Overview</h2>
+      <p>This page describes the main path data takes from upload to CSV export, with key functions and files.</p>
+  <p class="muted">Streaming decision: when OCR line count exceeds <code>settings.LLM_STREAM_THRESHOLD_LINES</code> (default 40), the review page auto-starts streamed extraction via <code>/review/stream</code>; otherwise it uses a single non-stream call.</p>
+    </div>
+
+    <div class="card">
+      <h2>1) Upload → Queue Jobs</h2>
+      <ul>
+        <li>Route: <code>POST /upload/batch</code> in <code>app/main.py</code></li>
+        <li>Saves images to <code>data/uploads/</code>, dedupes by sha1 (<code>uploads_index.json</code>), enqueues background jobs via <code>job_manager.enqueue</code>.</li>
+        <li>Artifacts: uploaded file name <code>&lt;timestamp&gt;_&lt;orig_name&gt;</code></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>2) OCR & LLM Extraction</h2>
+      <ul>
+        <li>OCR functions: <code>ocr_on_cropped_image</code>, <code>ocr_image</code> in <code>app/services/ocr.py</code>; overlay via <code>draw_overlay_on_image</code>.</li>
+        <li>LLM functions: <code>extract_fields_from_text</code> (non-stream) and <code>stream_extract_events</code> in <code>app/services/llm.py</code>.</li>
+  <li>Model: uses configured <code>settings.OLLAMA_MODEL</code> (strict, no fallback).</li>
+        <li>Review builder: <code>_build_review_context</code> in <code>app/main.py</code> runs OCR+LLM and writes artifacts:</li>
+        <ul>
+          <li><code>data/processed/ocr_*.json</code> (OCR text + lines)</li>
+          <li><code>data/processed/overlay_*.jpg</code> (highlighted overlay)</li>
+          <li><code>data/processed/fields_*.json</code> (LLM fields + metrics)</li>
+        </ul>
+        <li>Streaming UI: <code>GET /review/stream</code> SSE endpoint; client in <code>app/templates/review.html</code> (Start/Stop, live log, ETA, apply-to-form)</li>
+        <li>LLM metrics persistence: <code>insert_llm_run</code> in <code>app/services/db.py</code>; written in both standard and streamed runs.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>OCR Pipeline (internals)</h2>
+      <div class="mermaid">
+ flowchart TD
+  A[Input image] --> B[Light preprocess gray CLAHE]
+  B --> C[Upscale if small]
+  C --> D[Variant gray]
+  C --> E[Variant threshold open blur]
+  D --> F[run ocr PSM 6 4 11 7 3]
+  E --> G[run ocr PSM 6 4 11 7 3]
+  F --> T[Parse filter group lines]
+  G --> T
+  T --> H[Pick best by word count]
+  H --> I[Best result fields]
+  I --> O1[Write ocr json]
+  I --> O2[Provide text to llm]
+  I --> J[Draw overlay]
+  J --> O3[Write overlay image]
+  A --> K[Raw variants rgb gray invert]
+  K --> L[run raw with PSM list]
+  L --> T
+  </div>
+      <div class="muted" style="font-size:0.9rem; margin-top:0.25rem;">
+        Steps: preprocess and upscale, try two variants, run several PSM modes, parse and filter by confidence, pick the best by word count, draw overlay. Raw mode sends rgb/gray/invert directly to the same selection.
+      </div>
+      <p class="muted" style="margin-top:0.5rem;">Best variant is chosen by highest recognized word count; result includes the exact image used so overlays align pixel-for-pixel.</p>
+    </div>
+
+    <div class="card">
+      <h2>LLM Pipeline (internals)</h2>
+  <div class="mermaid">
+flowchart TD
+  IN[Inputs ocr text and lines] --> C1[Clean text and normalize whitespace]
+  C1 --> C2[Filter useful lines]
+  C2 --> C3[Apply limits max chars and max lines]
+  C3 --> C4[Build prompt with full text and indexed lines]
+  C4 --> Q{OCR lines exceed threshold?}
+
+  Q -- no --> G1[Ollama generate nonstream json]
+  G1 --> P1[Parse json to fields]
+  P1 --> N1[Normalize defaults and numbers]
+  N1 --> O1[Write fields json]
+  N1 --> O2[Update review form]
+  G1 --> MET1[Collect metrics tokens durations]
+  MET1 --> O3[Persist llm runs]
+
+  Q -- yes --> G2[Ollama generate stream true json]
+  G2 --> S1[Stream events start delta done]
+  S1 --> SD[On done build final text]
+  SD --> P2[Parse json to fields]
+  P2 --> N1
+  S1 --> SSE[Send sse to client]
+  S1 --> CAN[Support cancel by sid]
+  SD --> MET2[Collect final metrics]
+  MET2 --> O3
+      </div>
+      <div class="muted" style="font-size:0.9rem; margin-top:0.25rem;">
+    Uses the configured model from config (strict). The branch point chooses streaming when OCR lines exceed <code>settings.LLM_STREAM_THRESHOLD_LINES</code> (default 40). Non-stream posts once and parses the result. Streaming emits start/delta/done events for the UI, then parses the final text and records metrics. Both paths produce fields json and update the review form.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3) Review & Save</h2>
+      <ul>
+        <li>Page: <code>GET /review?file=...</code> renders <code>app/templates/review.html</code> with OCR, overlay, fields, metrics.</li>
+        <li>Save route: <code>POST /save</code> appends to CSV via <code>CSVWriter</code> and persists to DB via <code>insert_receipt</code>, <code>insert_line_items</code>.</li>
+        <li>New catalog seeding: on save, auto-upserts <em>abstract items</em>, <em>item variants</em>, and <em>price captures</em> from each line item (see <code>app/services/db.py</code>).</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>4) CSV Export</h2>
+      <ul>
+        <li>Route: <code>GET /download/csv</code> returns <code>data/ynab_receipts.csv</code>.</li>
+        <li>Writer: <code>app/utils/csv_writer.py</code> ensures headers and appends rows in <code>/save</code>.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Key Files & Functions</h2>
+      <ul>
+        <li><code>app/main.py</code>: routes (<code>/upload/batch</code>, <code>/review</code>, <code>/review/stream</code>, <code>/save</code>, <code>/jobs</code>, <code>/processed</code>, <code>/admin/*</code>, <code>/metrics/*</code>)</li>
+        <li><code>app/services/ocr.py</code>: OCR extraction + overlay drawing</li>
+        <li><code>app/services/llm.py</code>: LLM health, model selection, non-stream + stream extraction, metrics</li>
+        <li><code>app/services/db.py</code>: schema, receipts/merchants/line_items, LLM runs, catalog (abstract_items, item_variants, price_captures)</li>
+        <li><code>app/templates/*.html</code>: upload, review, jobs, processed, DB browser, metrics, items catalog</li>
+        <li><code>data/*</code>: uploads, processed artifacts, csv exports</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Admin & Observability</h2>
+      <ul>
+        <li>DB Browser: <code>/admin/db</code></li>
+        <li>LLM Metrics: <code>/metrics/llm</code> (+ JSON: <code>/metrics/llm.json</code>)</li>
+        <li>Items Catalog: <code>/admin/items</code></li>
+        <li>Jobs: <code>/jobs</code>; Processed: <code>/processed</code></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Flow Diagram (Text)</h2>
+      <pre>
+Upload (/upload/batch)
+  → Save file to data/uploads + enqueue job
+  → Review (cache-first) or rerun OCR/LLM
+      OCR (ocr_on_cropped_image) → ocr_*.json, overlay_*.jpg
+      LLM (extract_fields_from_text or stream_extract_events) → fields_*.json, metrics → llm_runs
+  → Review UI (apply-to-form) → Save (/save)
+      CSV append (YNAB format)
+      DB persist: receipts, line_items
+      Catalog seeding: abstract_items, item_variants, price_captures
+  → Export CSV (/download/csv)
+      </pre>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    try { mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' }); } catch(e){}
+  </script>
+</body>
+</html>

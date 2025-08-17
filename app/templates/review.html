@@ -28,7 +28,7 @@
     .key-hint { color: #666; font-size: 0.85rem; }
   </style>
 </head>
-<body>
+<body data-auto-stream="{{ '1' if auto_stream else '0' }}" data-ocr-lines="{{ (ocr_lines|length) if ocr_lines else 0 }}">
   <h1 style="display:flex; align-items:center; gap:0.75rem;">Review & Edit
     {% if used_model %}
       <a href="/health/llm" target="_blank" title="LLM health and available models" class="badge ok">LLM: {{ used_model }}</a>
@@ -229,6 +229,9 @@
   let sid = null;
   let avgTpsCache = null;
   let avgWallCache = null;
+  // Server-provided hints via data-* attributes
+  const autoStream = (document.body && document.body.dataset && document.body.dataset.autoStream === '1');
+  const ocrLineCount = parseInt((document.body && document.body.dataset && document.body.dataset.ocrLines) || '0', 10) || 0;
 
       let scale = 1.0;
       function applyScale() {
@@ -412,6 +415,19 @@
         if (etaEl) etaEl.textContent = '';
       });
       if (applyStreamBtn) applyStreamBtn.addEventListener('click', ()=>{ if (lastStreamObj) applyResultToForm(lastStreamObj); });
+
+      // Auto-start streaming when the OCR is long
+      try {
+        if (autoStream === true || autoStream === 'true' || (typeof autoStream === 'boolean' && autoStream)) {
+          // Show panel and kick off stream shortly after load so UI is ready
+          setTimeout(() => {
+            startStream();
+          }, 100);
+          // Also reflect in status immediately
+          if (streamPanel) streamPanel.style.display = '';
+          if (streamStatus) streamStatus.textContent = 'Auto-started (long OCR)';
+        }
+      } catch(e) {}
     })();
   </script>
 </body>

@@ -98,22 +98,20 @@
       </div>
       <div>
         <div><strong>Timing</strong></div>
-        <div>Wall: {{ '%.3f'|format(metrics.timing.wall_sec) if metrics.timing.wall_sec is not none else 'n/a' }}s</div>
-        <div>Total: {{ '%.3f'|format(metrics.timing.total_sec) if metrics.timing.total_sec is not none else 'n/a' }}s</div>
-        <div>Prompt eval: {{ '%.3f'|format(metrics.timing.prompt_eval_sec) if metrics.timing.prompt_eval_sec is not none else 'n/a' }}s</div>
-        <div>Completion eval: {{ '%.3f'|format(metrics.timing.eval_sec) if metrics.timing.eval_sec is not none else 'n/a' }}s</div>
-        <div>TPS (completion): {{ '%.1f'|format(metrics.timing.tps_completion) if metrics.timing.tps_completion is not none else 'n/a' }}</div>
-        <div>TPS (end-to-end): {{ '%.1f'|format(metrics.timing.tps_end_to_end) if metrics.timing.tps_end_to_end is not none else 'n/a' }}</div>
+  <div>Wall: {{ '%.3f'|format(metrics.timing.get('wall_sec')) if metrics.timing and metrics.timing.get('wall_sec') is not none else 'n/a' }}s</div>
+  <div>Total: {{ '%.3f'|format(metrics.timing.get('total_sec')) if metrics.timing and metrics.timing.get('total_sec') is not none else 'n/a' }}s</div>
+  <div>Prompt eval: {{ '%.3f'|format(metrics.timing.get('prompt_eval_sec')) if metrics.timing and metrics.timing.get('prompt_eval_sec') is not none else 'n/a' }}s</div>
+  <div>Completion eval: {{ '%.3f'|format(metrics.timing.get('eval_sec')) if metrics.timing and metrics.timing.get('eval_sec') is not none else 'n/a' }}s</div>
+  <div>TPS (completion): {{ '%.1f'|format(metrics.timing.get('tps_completion')) if metrics.timing and metrics.timing.get('tps_completion') is not none else 'n/a' }}</div>
+  <div>TPS (end-to-end): {{ '%.1f'|format(metrics.timing.get('tps_end_to_end')) if metrics.timing and metrics.timing.get('tps_end_to_end') is not none else 'n/a' }}</div>
       </div>
     </div>
   </div>
   {% endif %}
   <p>
     <a href="/review?file={{ stored_filename }}&rerun=1" title="Queue background job to re-run OCR and LLM (ignores cache)">Re-process (background)</a>
-  
-  <p>
-    <a href="/review?file={{ stored_filename }}&rerun=1" title="Queue background job to re-run OCR and LLM (ignores cache)">Re-process (background)</a>
   </p>
+  {% if assoc %}
       <ul>
         <li>Date → {{ assoc.date if assoc.date else 'n/a' }}</li>
         <li>Payee → {{ assoc.payee if assoc.payee else 'n/a' }}</li>

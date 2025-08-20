@@ -1,3 +1,4 @@
+# --- Imports ---
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple, cast, List
@@ -42,6 +43,131 @@ app.mount("/data", StaticFiles(directory=str(settings.DATA_DIR)), name="data")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
+
+# --- Home route ---
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("home.html", {"request": request})
+
+# --- Upload page ---
+@app.get("/upload", response_class=HTMLResponse)
+async def upload_page(request: Request):
+    return templates.TemplateResponse("upload.html", {"request": request})
+
+# --- YNAB: Settings (GET) ---
+@app.get("/settings/ynab", response_class=HTMLResponse)
+async def settings_ynab(request: Request):
+    client = YNABClient()
+    configured = client.is_configured()
+    budgets = []
+    accounts = []
+    category_groups = []
+    payees = []
+    error = None
+    selected_budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
+    try:
+        if configured:
+            try:
+                data = client.budgets()
+                budgets = data.get("budgets", []) if isinstance(data, dict) else []
+            except Exception as e:
+                error = f"Failed to load budgets: {e}"
+            # Use first budget if none selected
+            if not selected_budget_id and budgets:
+                try:
+                    selected_budget_id = str(budgets[0].get("id") or "")
+                except Exception:
+                    selected_budget_id = ""
+            # Fetch per-budget data
+            if selected_budget_id:
+                try:
+                    ad = client.accounts(selected_budget_id)
+                    raw_accounts = ad.get("accounts", []) if isinstance(ad, dict) else []
+                    accounts = [a for a in raw_accounts if not a.get("closed")]
+                except Exception:
+                    pass
+                try:
+                    cd = client.categories(selected_budget_id)
+                    raw_groups = cd.get("category_groups", []) if isinstance(cd, dict) else []
+                    # Filter hidden/deleted categories
+                    for g in raw_groups:
+                        cats = [c for c in (g.get("categories", []) or []) if not c.get("hidden") and not c.get("deleted")]
+                        if cats:
+                            category_groups.append({"name": g.get("name"), "categories": cats})
+                except Exception:
+                    pass
+                try:
+                    pd = client.payees(selected_budget_id)
+                    payees = pd.get("payees", []) if isinstance(pd, dict) else []
+                except Exception:
+                    pass
+    except Exception as e:
+        error = str(e)
+    ctx = {
+        "request": request,
+        "configured": configured,
+        "budgets": budgets,
+        "selected_budget_id": selected_budget_id,
+        "accounts": accounts,
+        "category_groups": category_groups,
+        "payees": payees,
+        "error": error,
+    }
+    return templates.TemplateResponse("settings_ynab.html", ctx)
+
+# --- YNAB: Metadata (GET) ---
+@app.get("/ynab/meta", response_class=HTMLResponse)
+async def ynab_meta(request: Request):
+    client = YNABClient()
+    configured = client.is_configured()
+    budgets = []
+    accounts = []
+    category_groups = []
+    error_budgets = None
+    error_accounts = None
+    error_categories = None
+    active_budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
+    default_account_id = settings.YNAB_DEFAULT_ACCOUNT_ID or ""
+    if configured:
+        try:
+            bd = client.budgets()
+            budgets = bd.get("budgets", []) if isinstance(bd, dict) else []
+        except Exception as e:
+            error_budgets = str(e)
+        if not active_budget_id and budgets:
+            try:
+                active_budget_id = str(budgets[0].get("id") or "")
+            except Exception:
+                active_budget_id = ""
+        if active_budget_id:
+            try:
+                ad = client.accounts(active_budget_id)
+                raw_accounts = ad.get("accounts", []) if isinstance(ad, dict) else []
+                accounts = [a for a in raw_accounts if not a.get("closed")]
+            except Exception as e:
+                error_accounts = str(e)
+            try:
+                cd = client.categories(active_budget_id)
+                raw_groups = cd.get("category_groups", []) if isinstance(cd, dict) else []
+                for g in raw_groups:
+                    cats = [c for c in (g.get("categories", []) or []) if not c.get("hidden") and not c.get("deleted")]
+                    if cats:
+                        category_groups.append({"name": g.get("name"), "categories": cats})
+            except Exception as e:
+                error_categories = str(e)
+    ctx = {
+        "request": request,
+        "configured": configured,
+        "budgets": budgets,
+        "accounts": accounts,
+        "category_groups": category_groups,
+        "active_budget_id": active_budget_id,
+        "default_account_id": default_account_id,
+        "error_budgets": error_budgets,
+        "error_accounts": error_accounts,
+        "error_categories": error_categories,
+    }
+    return templates.TemplateResponse("ynab_meta.html", ctx)
 
 def _load_user_conf() -> dict:
     try:

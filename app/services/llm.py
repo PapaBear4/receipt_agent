@@ -72,7 +72,6 @@ def _http_post(url: str, payload: dict, timeout: int) -> requests.Response:
         time.sleep(0.3)
         return requests.post(url, json=payload, timeout=timeout)
 
-
 def ollama_health() -> Dict[str, object]:
     """Check Ollama endpoint and model availability.
 
@@ -304,10 +303,6 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
     except Exception as e:
         logging.error("LLM extraction failed: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}, "items": []}
-
-
-# Streaming helpers and prompt builders removed; non-streaming only.
-
 
 def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None) -> Dict:
     """Extract only header/meta fields quickly (date, payee, total, payment).

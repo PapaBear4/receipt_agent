@@ -74,8 +74,8 @@ class Settings:
 
     # LLM (Ollama)
     OLLAMA_ENDPOINT: str = os.getenv("OLLAMA_ENDPOINT", "http://127.0.0.1:11434")
-    #OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "granite3.3:8b")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
+    #OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "granite3.3:8b")
     OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "2400")) # measured in seconds
 
     # LLM prompt sizing & content (env overridable)
@@ -87,8 +87,6 @@ class Settings:
     LLM_INCLUDE_FULL_TEXT: bool = os.getenv("LLM_INCLUDE_FULL_TEXT", "true").lower() in {"1", "true", "yes"}
     # When the OCR text is very long, prefer sending only indexed lines (drop full text)
     LLM_ONLY_INDEXED_WHEN_LONG: bool = os.getenv("LLM_ONLY_INDEXED_WHEN_LONG", "true").lower() in {"1", "true", "yes"}
-    # Auto-stream threshold: if OCR lines exceed this, the review page will auto-start live streaming
-    LLM_STREAM_THRESHOLD_LINES: int = int(os.getenv("LLM_STREAM_THRESHOLD_LINES", "40"))
 
     # Debugging
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}

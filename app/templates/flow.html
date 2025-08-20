@@ -28,14 +28,10 @@ flowchart TD
   B --> C{Review existing}
   C -->|cache hit| D[Load cached]
   C -->|rerun or miss| E[OCR → JSON + Overlay]
-  E --> X{Long OCR}
-  X -->|no| F1[LLM non‑stream → Fields]
-  X -->|yes| F2[LLM stream → Fields]
-  F1 --> G[Persist metrics]
-  F2 --> G
+  E --> F[LLM (background) → Fields]
+  F --> G[Persist metrics]
   D --> H[Review]
-  F1 --> H
-  F2 --> H
+  F --> H
   H --> I[Save]
   I --> J[CSV append]
   I --> K[DB persist]
@@ -50,7 +46,7 @@ flowchart TD
     <div class="card">
       <h2>Overview</h2>
       <p>This page describes the main path data takes from upload to CSV export, with key functions and files.</p>
-  <p class="muted">Streaming decision: when OCR line count exceeds <code>settings.LLM_STREAM_THRESHOLD_LINES</code> (default 40), the review page auto-starts streamed extraction via <code>/review/stream</code>; otherwise it uses a single non-stream call.</p>
+  <p class="muted">All LLM extraction runs as a background, non-streaming task. Review loads cached results when available or enqueues a job and redirects to Jobs.</p>
     </div>
 
     <div class="card">
@@ -66,16 +62,15 @@ flowchart TD
       <h2>2) OCR & LLM Extraction</h2>
       <ul>
         <li>OCR functions: <code>ocr_on_cropped_image</code>, <code>ocr_image</code> in <code>app/services/ocr.py</code>; overlay via <code>draw_overlay_on_image</code>.</li>
-        <li>LLM functions: <code>extract_fields_from_text</code> (non-stream) and <code>stream_extract_events</code> in <code>app/services/llm.py</code>.</li>
+    <li>LLM function: <code>extract_fields_from_text</code> (non-stream) in <code>app/services/llm.py</code>.</li>
   <li>Model: uses configured <code>settings.OLLAMA_MODEL</code> (strict, no fallback).</li>
-        <li>Review builder: <code>_build_review_context</code> in <code>app/main.py</code> runs OCR+LLM and writes artifacts:</li>
+    <li>Background job writes artifacts:</li>
         <ul>
           <li><code>data/processed/ocr_*.json</code> (OCR text + lines)</li>
           <li><code>data/processed/overlay_*.jpg</code> (highlighted overlay)</li>
           <li><code>data/processed/fields_*.json</code> (LLM fields + metrics)</li>
         </ul>
-        <li>Streaming UI: <code>GET /review/stream</code> SSE endpoint; client in <code>app/templates/review.html</code> (Start/Stop, live log, ETA, apply-to-form)</li>
-        <li>LLM metrics persistence: <code>insert_llm_run</code> in <code>app/services/db.py</code>; written in both standard and streamed runs.</li>
+  <li>LLM metrics persistence: <code>insert_llm_run</code> in <code>app/services/db.py</code> after each background run.</li>
       </ul>
     </div>
 
@@ -115,25 +110,12 @@ flowchart TD
   C1 --> C2[Filter useful lines]
   C2 --> C3[Apply limits max chars and max lines]
   C3 --> C4[Build prompt with full text and indexed lines]
-  C4 --> Q{OCR lines exceed threshold?}
-
-  Q -- no --> G1[Ollama generate nonstream json]
-  G1 --> P1[Parse json to fields]
+  C4 --> G1[Ollama generate (non-stream) JSON]
+  G1 --> P1[Parse JSON to fields]
   P1 --> N1[Normalize defaults and numbers]
   N1 --> O1[Write fields json]
-  N1 --> O2[Update review form]
   G1 --> MET1[Collect metrics tokens durations]
   MET1 --> O3[Persist llm runs]
-
-  Q -- yes --> G2[Ollama generate stream true json]
-  G2 --> S1[Stream events start delta done]
-  S1 --> SD[On done build final text]
-  SD --> P2[Parse json to fields]
-  P2 --> N1
-  S1 --> SSE[Send sse to client]
-  S1 --> CAN[Support cancel by sid]
-  SD --> MET2[Collect final metrics]
-  MET2 --> O3
       </div>
       <div class="muted" style="font-size:0.9rem; margin-top:0.25rem;">
     Uses the configured model from config (strict). The branch point chooses streaming when OCR lines exceed <code>settings.LLM_STREAM_THRESHOLD_LINES</code> (default 40). Non-stream posts once and parses the result. Streaming emits start/delta/done events for the UI, then parses the final text and records metrics. Both paths produce fields json and update the review form.
@@ -160,9 +142,9 @@ flowchart TD
     <div class="card">
       <h2>Key Files & Functions</h2>
       <ul>
-        <li><code>app/main.py</code>: routes (<code>/upload/batch</code>, <code>/review</code>, <code>/review/stream</code>, <code>/save</code>, <code>/jobs</code>, <code>/processed</code>, <code>/admin/*</code>, <code>/metrics/*</code>)</li>
+  <li><code>app/main.py</code>: routes (<code>/upload/batch</code>, <code>/review</code>, <code>/save</code>, <code>/jobs</code>, <code>/processed</code>, <code>/admin/*</code>, <code>/metrics/*</code>)</li>
         <li><code>app/services/ocr.py</code>: OCR extraction + overlay drawing</li>
-        <li><code>app/services/llm.py</code>: LLM health, model selection, non-stream + stream extraction, metrics</li>
+  <li><code>app/services/llm.py</code>: LLM health, model selection, non-stream extraction, metrics</li>
         <li><code>app/services/db.py</code>: schema, receipts/merchants/line_items, LLM runs, catalog (abstract_items, item_variants, price_captures)</li>
         <li><code>app/templates/*.html</code>: upload, review, jobs, processed, DB browser, metrics, items catalog</li>
         <li><code>data/*</code>: uploads, processed artifacts, csv exports</li>
@@ -186,7 +168,7 @@ Upload (/upload/batch)
   → Save file to data/uploads + enqueue job
   → Review (cache-first) or rerun OCR/LLM
       OCR (ocr_on_cropped_image) → ocr_*.json, overlay_*.jpg
-      LLM (extract_fields_from_text or stream_extract_events) → fields_*.json, metrics → llm_runs
+  LLM (extract_fields_from_text background) → fields_*.json, metrics → llm_runs
   → Review UI (apply-to-form) → Save (/save)
       CSV append (YNAB format)
       DB persist: receipts, line_items

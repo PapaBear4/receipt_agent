@@ -28,7 +28,7 @@
     .key-hint { color: #666; font-size: 0.85rem; }
   </style>
 </head>
-<body data-auto-stream="{{ '1' if auto_stream else '0' }}" data-ocr-lines="{{ (ocr_lines|length) if ocr_lines else 0 }}">
+<body>
   <h1 style="display:flex; align-items:center; gap:0.75rem;">Review & Edit
     {% if used_model %}
       <a href="/health/llm" target="_blank" title="LLM health and available models" class="badge ok">LLM: {{ used_model }}</a>
@@ -70,23 +70,7 @@
   {% if ocr_json_url %}
   <p><a href="{{ ocr_json_url }}" download>Download OCR JSON</a></p>
   {% endif %}
-  <div class="card" style="margin:1rem 0;">
-    <h3 style="margin-top:0; display:flex; align-items:center; gap:0.5rem;">Live LLM Stream
-      <button type="button" id="streamBtn" style="margin-left:auto;">Start</button>
-      <button type="button" id="streamStopBtn">Stop</button>
-      <a href="/metrics/llm" target="_blank" class="badge" style="margin-left:0.5rem;">LLM Metrics</a>
-    </h3>
-    <div id="streamPanel" style="display:none;">
-      <div id="streamStatus" class="muted" style="margin-bottom:0.5rem; color:#666;">Idle</div>
-      <pre id="streamLog" style="background:#fafafa; border:1px solid #eee; padding:8px; height:160px; overflow:auto; white-space:pre-wrap;"></pre>
-      <div id="streamSummary" style="margin-top:0.5rem;"></div>
-      <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
-        <button type="button" id="applyStreamBtn" disabled>Apply to form</button>
-        <span id="streamStats" class="muted" style="align-self:center; color:#666;"></span>
-        <span id="eta" class="muted" style="align-self:center; color:#666;"></span>
-      </div>
-    </div>
-  </div>
+  <p><a href="/metrics/llm" target="_blank" class="badge">LLM Metrics</a></p>
   {% if metrics %}
   <div class="card" style="margin:1rem 0;">
     <h3 style="margin-top:0;">LLM Metrics</h3>
@@ -126,13 +110,10 @@
   {% endif %}
   <p>
     <a href="/review?file={{ stored_filename }}&rerun=1" title="Queue background job to re-run OCR and LLM (ignores cache)">Re-process (background)</a>
-  &nbsp;|&nbsp;
-  <a href="#" id="streamLink" title="Stream LLM output live">Live Re-process (stream)</a>
+  
+  <p>
+    <a href="/review?file={{ stored_filename }}&rerun=1" title="Queue background job to re-run OCR and LLM (ignores cache)">Re-process (background)</a>
   </p>
-      <h3>Raw OCR Text</h3>
-      <textarea readonly>{{ raw_text }}</textarea>
-      {% if ocr_lines and assoc %}
-      <h3>Matched Lines</h3>
       <ul>
         <li>Date → {{ assoc.date if assoc.date else 'n/a' }}</li>
         <li>Payee → {{ assoc.payee if assoc.payee else 'n/a' }}</li>
@@ -230,30 +211,13 @@
       const form = document.getElementById('reviewForm');
   const itemsBody = document.getElementById('items_tbody');
   const itemsJson = document.getElementById('items_json');
-  const streamBtn = document.getElementById('streamBtn');
-  const streamStopBtn = document.getElementById('streamStopBtn');
-  const streamLink = document.getElementById('streamLink');
-  const streamPanel = document.getElementById('streamPanel');
-  const streamLog = document.getElementById('streamLog');
-  const streamStatus = document.getElementById('streamStatus');
-  const streamSummary = document.getElementById('streamSummary');
-  const applyStreamBtn = document.getElementById('applyStreamBtn');
-  const streamStats = document.getElementById('streamStats');
-  const etaEl = document.getElementById('eta');
   const storedInput = document.querySelector('input[name="stored_filename"]');
-  let es = null;
-  let lastStreamObj = null;
-  let lastStreamMetrics = null;
-  let sid = null;
-  let avgTpsCache = null;
-  let avgWallCache = null;
+  
   const ynabBtn = document.getElementById('ynabBtn');
   const ynabStatus = document.getElementById('ynabStatus');
   const saveAcctDefaultBtn = document.getElementById('saveAcctDefaultBtn');
   const saveAcctDefaultStatus = document.getElementById('saveAcctDefaultStatus');
-  // Server-provided hints via data-* attributes
-  const autoStream = (document.body && document.body.dataset && document.body.dataset.autoStream === '1');
-  const ocrLineCount = parseInt((document.body && document.body.dataset && document.body.dataset.ocrLines) || '0', 10) || 0;
+  
 
       let scale = 1.0;
       function applyScale() {
@@ -299,18 +263,7 @@
         });
       }
 
-      function appendLog(text) {
-        if (!streamLog) return;
-        streamLog.textContent += text;
-        streamLog.scrollTop = streamLog.scrollHeight;
-      }
-      function fmtSecs(s){ return s != null ? (Math.round(s*10)/10)+'s' : 'n/a'; }
-      function renderMetrics(m){
-        if (!m) return '';
-        const p = m.prompt || {}; const t = m.timing || {}; const r = m.response || {};
-        return `Prompt: ${p.chars||0} chars, ${p.lines||0} lines; indexed ${p.indexed_lines||0}; full text ${p.include_full_text?'yes':'no'}\n`
-             + `Timing: wall ${fmtSecs(t.wall_sec)}; eval ${fmtSecs(t.eval_sec)}; TPS(e2e) ${t.tps_end_to_end? t.tps_end_to_end.toFixed(1):'n/a'}`;
-      }
+      
       function applyResultToForm(obj){
         if (!obj) return;
         try {
@@ -337,106 +290,7 @@
           }
         } catch {}
       }
-      async function loadAverages(){
-        try {
-          const r = await fetch('/metrics/llm.json');
-          if (!r.ok) return;
-          const list = await r.json();
-          const usedModelBadge = document.querySelector('.badge.ok');
-          const model = usedModelBadge ? usedModelBadge.textContent.replace('LLM: ','').trim() : '';
-          const entry = (list||[]).find(x => (x.model||'')===model);
-          if (entry) {
-            avgTpsCache = entry.avg_tps || null;
-            avgWallCache = entry.avg_wall || null;
-          }
-        } catch {}
-      }
-
-      function computeEta(metrics){
-        try {
-          if (!metrics) return '';
-          const p = metrics.prompt||{};
-          // Estimate tokens as ~ chars/4 if we don't have token counts yet
-          const estTokens = (p.chars ? Math.max(1, Math.round(p.chars/4)) : null);
-          if (avgTpsCache && estTokens) {
-            const sec = estTokens / avgTpsCache;
-            if (isFinite(sec)) return `ETA ~ ${Math.round(sec)}s`;
-          }
-          if (avgWallCache) return `ETA ~ ${Math.round(avgWallCache)}s`;
-        } catch {}
-        return '';
-      }
-
-      function startStream(){
-        const stored = storedInput ? storedInput.value : '';
-        if (!stored) return;
-        if (es) { try { es.close(); } catch(e){} }
-        if (streamPanel) streamPanel.style.display = '';
-        if (streamLog) streamLog.textContent = '';
-        streamSummary.innerHTML = '';
-        lastStreamObj = null; lastStreamMetrics = null;
-        streamStatus.textContent = 'Connecting...';
-        sid = Math.random().toString(36).slice(2);
-        es = new EventSource(`/review/stream?file=${encodeURIComponent(stored)}&sid=${encodeURIComponent(sid)}`);
-        const startedAt = Date.now();
-        es.onmessage = (ev) => {
-          try {
-            const data = JSON.parse(ev.data);
-            if (data.type === 'start') {
-              streamStatus.textContent = `Started with model ${data.model}`;
-              lastStreamMetrics = data.metrics;
-              streamStats.textContent = renderMetrics(lastStreamMetrics);
-              if (etaEl) {
-                const e = computeEta(lastStreamMetrics);
-                etaEl.textContent = e;
-              }
-            } else if (data.type === 'delta') {
-              appendLog(data.delta);
-              const elapsed = (Date.now()-startedAt)/1000;
-              streamStatus.textContent = `Streaming... ${Math.round(elapsed)}s`;
-            } else if (data.type === 'done') {
-              appendLog('\n\n[done]\n');
-              lastStreamObj = data.object || null;
-              lastStreamMetrics = data.metrics || lastStreamMetrics;
-              streamStats.textContent = renderMetrics(lastStreamMetrics);
-              streamSummary.textContent = JSON.stringify(data.object || {}, null, 2);
-              applyStreamBtn.disabled = !lastStreamObj;
-              streamStatus.textContent = 'Completed';
-              try { es.close(); } catch(e){}
-              sid = null;
-              if (etaEl) etaEl.textContent = '';
-            } else if (data.type === 'error') {
-              streamStatus.textContent = `Error: ${data.message}`;
-              try { es.close(); } catch(e){}
-              sid = null;
-              if (etaEl) etaEl.textContent = '';
-            }
-          } catch(e) {}
-        };
-        es.onerror = () => {
-          streamStatus.textContent = 'Connection error';
-          try { es.close(); } catch(e){}
-          sid = null;
-          if (etaEl) etaEl.textContent = '';
-        };
-      }
-  // Preload averages once
-  loadAverages();
-  if (streamBtn) streamBtn.addEventListener('click', startStream);
-      if (streamLink) streamLink.addEventListener('click', (e)=>{ e.preventDefault(); startStream(); });
-      if (streamStopBtn) streamStopBtn.addEventListener('click', async ()=>{
-        if (es) { try { es.close(); } catch(e){} }
-        if (sid) {
-          try {
-            const fd = new FormData(); fd.append('sid', sid);
-            await fetch('/review/stream/cancel', { method: 'POST', body: fd });
-          } catch(e) {}
-          sid = null;
-        }
-        streamStatus.textContent='Stopped';
-        if (etaEl) etaEl.textContent = '';
-      });
-      if (applyStreamBtn) applyStreamBtn.addEventListener('click', ()=>{ if (lastStreamObj) applyResultToForm(lastStreamObj); });
+      
 
       // YNAB push
       if (ynabBtn) ynabBtn.addEventListener('click', async ()=>{
@@ -460,18 +314,7 @@
         } catch(e){ ynabStatus.textContent = 'Error sending'; }
       });
 
-      // Auto-start streaming when the OCR is long
-      try {
-        if (autoStream === true || autoStream === 'true' || (typeof autoStream === 'boolean' && autoStream)) {
-          // Show panel and kick off stream shortly after load so UI is ready
-          setTimeout(() => {
-            startStream();
-          }, 100);
-          // Also reflect in status immediately
-          if (streamPanel) streamPanel.style.display = '';
-          if (streamStatus) streamStatus.textContent = 'Auto-started (long OCR)';
-        }
-      } catch(e) {}
+  // streaming removed
 
       // Save durable mapping for account by last4
       if (saveAcctDefaultBtn) saveAcctDefaultBtn.addEventListener('click', async ()=>{

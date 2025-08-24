@@ -14,7 +14,9 @@
     legend { padding: 0 6px; font-weight: 600; }
   .field label { display: block; font-size: 12px; color: #333; margin-bottom: 2px; }
   .hint { font-size: 11px; color: #666; margin-top: 2px; display: block; }
-  input[type=text], input[type=number], select { width: 100%; padding: 6px 8px; }
+  /* Prevent input overhang in CSS grid: allow shrink and include padding in width */
+  .field { min-width: 0; }
+  input[type=text], input[type=number], select, textarea { width: 100%; max-width: 100%; padding: 6px 8px; box-sizing: border-box; }
   input[type=checkbox] { transform: scale(1.1); vertical-align: middle; }
   .checks { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 8px 16px; align-items: center; }
   .checks label { font-size: 13px; color: #222; }
@@ -139,18 +141,10 @@
 
       <fieldset class="col">
         <legend>LLM</legend>
-        <div class="checks">
-          <label title="Append the full OCR text to the prompt. Slower, but can improve recall."><input type="checkbox" name="LLM_INCLUDE_FULL_TEXT" {% if defaults.LLM_INCLUDE_FULL_TEXT %}checked{% endif %} /> Include full text in prompt</label>
-          <label title="When the prompt is too long, send only the numbered lines block to stay under limits."><input type="checkbox" name="LLM_ONLY_INDEXED_WHEN_LONG" {% if defaults.LLM_ONLY_INDEXED_WHEN_LONG %}checked{% endif %} /> Only indexed when long</label>
-        </div>
         <div class="grid-2" style="margin-top:10px;">
           <div class="field">
             <label>Max lines <span class="hint">0 = no limit. Smaller focuses the header area.</span></label>
             <input type="number" step="1" name="LLM_MAX_LINES" value="{{ defaults.LLM_MAX_LINES }}" />
-          </div>
-          <div class="field">
-            <label>Max chars <span class="hint">0 = auto. Hard cap for prompt size before truncation.</span></label>
-            <input type="number" step="1" name="LLM_MAX_CHARS" value="{{ defaults.LLM_MAX_CHARS }}" />
           </div>
         </div>
       </fieldset>
@@ -171,8 +165,7 @@
     </div>
 
     <!-- Hidden OCR payload passthrough for LLM-only submit -->
-    <input type="hidden" name="ocr_text" value="{{ ocr_text | default('') | e }}" />
-    <input type="hidden" name="ocr_lines_json" value="{{ ocr_lines_json | default('') | e }}" />
+  <input type="hidden" name="ocr_lines_json" value="{{ ocr_lines_json | default('') | e }}" />
 
     <p class="actions">
       <button type="submit">Run OCR + LLM</button>

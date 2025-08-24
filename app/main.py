@@ -748,9 +748,6 @@ async def lab_preview(
     # LLM overrides
     OLLAMA_MODEL: Optional[str] = Form(None),
     LLM_MAX_LINES: Optional[str] = Form(None),
-    LLM_MAX_CHARS: Optional[str] = Form(None),
-    LLM_INCLUDE_FULL_TEXT: Optional[str] = Form(None),
-    LLM_ONLY_INDEXED_WHEN_LONG: Optional[str] = Form(None),
     OLLAMA_TIMEOUT: Optional[str] = Form(None),
 ):
     # Build overrides dict with proper types
@@ -852,14 +849,7 @@ async def lab_preview(
         v = to_int(LLM_MAX_LINES, None)
         if v is not None:
             llm_overrides["LLM_MAX_LINES"] = v
-    if LLM_MAX_CHARS is not None:
-        v = to_int(LLM_MAX_CHARS, None)
-        if v is not None:
-            llm_overrides["LLM_MAX_CHARS"] = v
-    if LLM_INCLUDE_FULL_TEXT is not None:
-        llm_overrides["LLM_INCLUDE_FULL_TEXT"] = to_bool(LLM_INCLUDE_FULL_TEXT)
-    if LLM_ONLY_INDEXED_WHEN_LONG is not None:
-        llm_overrides["LLM_ONLY_INDEXED_WHEN_LONG"] = to_bool(LLM_ONLY_INDEXED_WHEN_LONG)
+    # Full text controls removed; we rely on indexed lines only
     if OLLAMA_TIMEOUT is not None:
         v = to_int(OLLAMA_TIMEOUT, None)
         if v is not None:
@@ -931,8 +921,7 @@ async def lab_preview(
         "selected": filename,
         "defaults": settings,
         "result": result,
-        "ocr": {"text": text, "lines": lines},
-        "ocr_text": text,
+    "ocr": {"text": text, "lines": lines},
         "ocr_lines_json": json.dumps(lines),
         "overlay_url": overlay_url,
         "ollama": ollama_health(),
@@ -1100,8 +1089,7 @@ async def lab_ocr(
         "selected": filename,
         "defaults": settings,
         "result": None,
-        "ocr": {"text": text, "lines": lines},
-        "ocr_text": text,
+    "ocr": {"text": text, "lines": lines},
         "ocr_lines_json": json.dumps(lines),
         "overlay_url": overlay_url,
         "ollama": ollama_health(),
@@ -1118,12 +1106,9 @@ async def lab_llm(
     # LLM overrides only
     OLLAMA_MODEL: Optional[str] = Form(None),
     LLM_MAX_LINES: Optional[str] = Form(None),
-    LLM_MAX_CHARS: Optional[str] = Form(None),
-    LLM_INCLUDE_FULL_TEXT: Optional[str] = Form(None),
-    LLM_ONLY_INDEXED_WHEN_LONG: Optional[str] = Form(None),
     OLLAMA_TIMEOUT: Optional[str] = Form(None),
     # OCR artifacts passed through hidden fields
-    ocr_text: Optional[str] = Form(None),
+    # no full-text passthrough needed
     ocr_lines_json: Optional[str] = Form(None),
 ):
     # Convert helpers
@@ -1144,14 +1129,7 @@ async def lab_llm(
         v = to_int(LLM_MAX_LINES, None)
         if v is not None:
             llm_overrides["LLM_MAX_LINES"] = v
-    if LLM_MAX_CHARS is not None:
-        v = to_int(LLM_MAX_CHARS, None)
-        if v is not None:
-            llm_overrides["LLM_MAX_CHARS"] = v
-    if LLM_INCLUDE_FULL_TEXT is not None:
-        llm_overrides["LLM_INCLUDE_FULL_TEXT"] = to_bool(LLM_INCLUDE_FULL_TEXT)
-    if LLM_ONLY_INDEXED_WHEN_LONG is not None:
-        llm_overrides["LLM_ONLY_INDEXED_WHEN_LONG"] = to_bool(LLM_ONLY_INDEXED_WHEN_LONG)
+    # Full-text/long-input controls removed
     if OLLAMA_TIMEOUT is not None:
         v = to_int(OLLAMA_TIMEOUT, None)
         if v is not None:
@@ -1159,7 +1137,7 @@ async def lab_llm(
 
     # Parse OCR artifacts from hidden fields
     lines: List[str] = []
-    text: str = ocr_text or ""
+    text: str = ""
     if ocr_lines_json:
         try:
             data = json.loads(ocr_lines_json)
@@ -1169,7 +1147,7 @@ async def lab_llm(
             lines = []
 
     # If no OCR provided, run a minimal OCR to get text and lines for LLM
-    if not text or not lines:
+    if not lines:
         src_path = settings.UPLOADS_DIR / filename
         if not src_path.exists():
             return HTMLResponse(status_code=404, content=f"File not found: {filename}")
@@ -1200,7 +1178,7 @@ async def lab_llm(
         "defaults": settings,
         "result": result,
         "ocr": {"text": text, "lines": lines},
-        "ocr_text": text,
+    # no full-text passthrough
         "ocr_lines_json": json.dumps(lines),
         "overlay_url": None,  # overlay comes from prior OCR run if any
         "ollama": ollama_health(),

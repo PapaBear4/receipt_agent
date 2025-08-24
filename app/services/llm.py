@@ -10,7 +10,7 @@ from typing import Any
 
 # Two-pass prompts
 META_PROMPT = (
-        """
+    """
 You are a receipt extraction assistant. Extract only HEADER fields and do not list items.
 Return ONLY valid JSON in this exact shape:
 {
@@ -33,7 +33,7 @@ Guidance:
 - Determine final total charged; fill payment breakouts if present.
 - Payment method and last 4 digits of the card when available.
 Input format notes:
-- You may receive OCR TEXT (raw multi-line text) and/or OCR LINES (indexed) below.
+- You will receive OCR LINES (indexed) below.
 - OCR LINES are shown as "i: <text>" where i starts at 0 and increases in reading order (top-to-bottom, left-to-right).
 - When referencing a specific line from OCR LINES, use its index number; do not invent indices that are not shown.
 Return only JSON.
@@ -108,16 +108,8 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 return overrides[name]
             return getattr(settings, name, default)
 
-        max_chars = int(cfg("LLM_MAX_CHARS", getattr(settings, "LLM_MAX_CHARS", 0) or 0))
-        if max_chars and max_chars > 0 and len(ocr_clean) > max_chars:
-            ocr_snippet = ocr_clean[:max_chars]
-        else:
-            ocr_snippet = ocr_clean
-
         used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
         max_lines = int(cfg("LLM_MAX_LINES", 250))
-        include_full_text = bool(cfg("LLM_INCLUDE_FULL_TEXT", True))
-        only_indexed_when_long = bool(cfg("LLM_ONLY_INDEXED_WHEN_LONG", True))
 
         # Build OCR lines preview block
         lines_block = ""
@@ -129,12 +121,8 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             included_lines_count = len(preview_lines)
             lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
 
-        long_input = (max_chars and len(ocr_clean) >= max_chars) or (max_lines and len(ocr_lines_clean) >= max_lines)
-
-        # Pass 1: META
+        # Pass 1: META (use indexed lines only)
         prompt_parts_meta: List[str] = [META_PROMPT]
-        if include_full_text and not (only_indexed_when_long and long_input):
-            prompt_parts_meta.append("\nOCR TEXT:\n" + (ocr_snippet or ""))
         if lines_block:
             prompt_parts_meta.append(lines_block)
         prompt_meta = "\n\n".join([p for p in prompt_parts_meta if p]) + "\n"
@@ -211,8 +199,6 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         )
 
         prompt_parts_items: List[str] = [items_preamble]
-        if include_full_text and not (only_indexed_when_long and long_input):
-            prompt_parts_items.append("\nOCR TEXT:\n" + (ocr_snippet or ""))
         if lines_block:
             prompt_parts_items.append(lines_block)
         prompt_items = "\n\n".join([p for p in prompt_parts_items if p]) + "\n"
@@ -266,10 +252,10 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             "prompt": {
                 "chars": len(prompt_items) + meta_chars,
                 "lines": meta_lines,
-                "include_full_text": bool(include_full_text and not (only_indexed_when_long and long_input)),
-                "long_input": bool(long_input),
+                "include_full_text": False,
+                "long_input": bool(max_lines and len(ocr_lines_clean) >= max_lines),
                 "indexed_lines": included_lines_count,
-                "max_chars": max_chars,
+                "max_chars": 0,
                 "max_lines": max_lines,
                 "cleanup": {
                     "raw_chars": len(raw_no_cr),
@@ -278,7 +264,7 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                     "cleaned_lines": len(cleaned_text_lines_list),
                     "provided_lines": len(ocr_lines or []),
                     "provided_lines_cleaned": len(ocr_lines_clean),
-                    "full_text_sent_chars": (len(ocr_snippet) if (include_full_text and not (only_indexed_when_long and long_input)) else 0),
+                    "full_text_sent_chars": 0,
                 },
             },
             "response": {
@@ -333,16 +319,8 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
                 return overrides[name]
             return getattr(settings, name, default)
 
-        max_chars = int(cfg("LLM_MAX_CHARS", getattr(settings, "LLM_MAX_CHARS", 0) or 0))
-        if max_chars and max_chars > 0 and len(ocr_clean) > max_chars:
-            ocr_snippet = ocr_clean[:max_chars]
-        else:
-            ocr_snippet = ocr_clean
-
         used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
         max_lines = int(cfg("LLM_MAX_LINES", 250))
-        include_full_text = bool(cfg("LLM_INCLUDE_FULL_TEXT", True))
-        only_indexed_when_long = bool(cfg("LLM_ONLY_INDEXED_WHEN_LONG", True))
 
         # Lines block
         lines_block = ""
@@ -355,14 +333,11 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
             lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
 
         # Build prompt
-        long_input = (max_chars and len(ocr_clean) >= max_chars) or (max_lines and len(ocr_lines_clean) >= max_lines)
+        long_input = bool(max_lines and len(ocr_lines_clean) >= max_lines)
         prompt_parts_meta: List[str] = [META_PROMPT]
-        if include_full_text and not (only_indexed_when_long and long_input):
-            prompt_parts_meta.append("\nOCR TEXT:\n" + (ocr_snippet or ""))
         if lines_block:
             prompt_parts_meta.append(lines_block)
         prompt_meta = "\n\n".join([p for p in prompt_parts_meta if p]) + "\n"
-        include_full_text_effective = bool(include_full_text and not (only_indexed_when_long and long_input))
         prompt_chars = len(prompt_meta)
         prompt_line_count = prompt_meta.count("\n") + 1
         _ = max(0.0, time.perf_counter() - tprep0)
@@ -426,7 +401,7 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
             "prompt": {
                 "chars": prompt_chars,
                 "lines": prompt_line_count,
-                "include_full_text": include_full_text_effective,
+                "include_full_text": False,
                 "indexed_lines": included_lines_count,
             },
             "response": {

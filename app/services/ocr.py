@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional
 from PIL import Image
 import pytesseract
 import importlib
@@ -6,7 +6,7 @@ import numpy as np
 
 from app.config import settings
 import logging
-from app.services.image_preproc import crop_receipt, make_receipt_preview
+# (no longer importing image_preproc here; OCR expects an in-memory image array)
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -26,74 +26,11 @@ except Exception as e:  # pragma: no cover - import resolution at runtime
 
 """
 MVP simplification: We removed automatic cropping/warping logic from this module.
-Use app.services.image_preproc.crop_receipt/make_receipt_preview as placeholders
-that simply return the original image for now. We'll revisit real detection later.
+Use app.services.image_preproc utilities in other modules if needed; this module
+focuses on robust OCR from an already-provided image array.
 """
 
-
-def _preprocess_for_ocr(image_path: str) -> np.ndarray:
-    """Basic preprocessing to clean noise and improve OCR.
-    - Convert to grayscale
-    - Resize up to improve readability
-    - Adaptive threshold
-    - Morphological opening to remove small artifacts
-    """
-    if settings.DEBUG:
-        logger.info("OCR preprocess start: %s", image_path)
-    if cv2 is None:
-        raise RuntimeError("OpenCV (cv2) is required for OCR preprocessing but is not installed.")
-    img = cv2.imread(image_path)
-    if img is None:
-        raise RuntimeError("Failed to read image for OCR")
-    # MVP: assume user uploads pre-cropped images; pass-through from placeholder crop if desired
-    try:
-        img = make_receipt_preview(image_path)  # placeholder currently returns original image
-    except Exception as e:
-        logger.debug("Preview placeholder failed: %s", e)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # scale up small images
-    h, w = gray.shape
-    scale = 2 if max(h, w) < 1500 else 1
-    if scale != 1:
-        gray = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-    # adaptive thresholding
-    th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                               cv2.THRESH_BINARY, 31, 10)
-    # morphological opening to remove small noise
-    kernel = np.ones((2, 2), np.uint8)
-    opened = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
-    # Crop to text region to remove background margins
-    try:
-        inv = 255 - opened  # text becomes white
-        nz = cv2.findNonZero(inv)
-        if nz is not None:
-            x, y, w_box, h_box = cv2.boundingRect(nz)
-            H, W = opened.shape[:2]
-            pad = max(10, int(0.02 * max(H, W)))
-            x0 = max(0, x - pad)
-            y0 = max(0, y - pad)
-            x1 = min(W, x + w_box + pad)
-            y1 = min(H, y + h_box + pad)
-            cropped = opened[y0:y1, x0:x1]
-        else:
-            cropped = opened
-    except Exception as e:
-        logger.debug("Cropping to text region failed: %s", e)
-        cropped = opened
-
-    if settings.DEBUG:
-        logger.info("OCR preprocess done: original=%s cropped=%s", opened.shape, cropped.shape)
-    return cropped
-
-
-def make_receipt_preview(image_path: str) -> np.ndarray:  # type: ignore[no-redef]
-    """Re-export placeholder for preview to keep existing imports working."""
-    return crop_receipt(image_path)
-
-
-# crop_receipt is imported from app.services.image_preproc
-
-
+# Light, coordinate-stable preprocessing for OCR: BGR->grayscale + optional CLAHE; no resize/thresh.
 def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
     """Light preprocessing intended not to destroy content.
     - Convert to grayscale
@@ -110,8 +47,9 @@ def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
         logger.debug("CLAHE failed, using plain grayscale: %s", e)
     return gray
 
-
-def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = None) -> Dict[str, Any]:
+# Main OCR routine: tries preprocessing variants and PSMs, scores by words/lines, returns best result
+# including text, words with boxes, line_ids, and the exact image used (proc_image).
+def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run OCR on a given (already cropped) image array with fallbacks.
 
     Tries multiple preprocessing variants and PSM modes, then returns the
@@ -120,26 +58,57 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     """
     assert cv2 is not None, "cv2 is required"
 
+    # Resolve configuration values with optional per-call overrides
+    def cfg(name: str, default: Any = None) -> Any:
+        if overrides is not None and name in overrides:
+            return overrides[name]
+        return getattr(settings, name, default)
+
+    DEBUG = bool(cfg("DEBUG", False))
+    TESSERACT_LANG = str(cfg("TESSERACT_LANG", "eng"))
+    RECEIPT_CONF_THRESHOLD = int(cfg("RECEIPT_CONF_THRESHOLD", 0))
+    OCR_RAW_ONLY = bool(cfg("OCR_RAW_ONLY", False))
+    OCR_OEM = int(cfg("OCR_OEM", 1))
+    OCR_USE_WHITELIST = bool(cfg("OCR_USE_WHITELIST", True))
+    # Avoid hard-coded escapes; fall back to settings default if not provided
+    OCR_CHAR_WHITELIST = str(cfg("OCR_CHAR_WHITELIST", getattr(settings, "OCR_CHAR_WHITELIST", "")))
+    OCR_DISABLE_DICTIONARY = bool(cfg("OCR_DISABLE_DICTIONARY", False))
+    OCR_PRESERVE_SPACES = bool(cfg("OCR_PRESERVE_SPACES", True))
+    OCR_USER_DPI = int(cfg("OCR_USER_DPI", 300))
+    OCR_PSMS = [int(p.strip()) for p in str(cfg("OCR_PSMS", "6,4,11,3,7")).split(',') if p.strip().isdigit()]
+    OCR_SCORE_LINES_WEIGHT = float(cfg("OCR_SCORE_LINES_WEIGHT", 0.5))
+    OCR_USE_THRESH = bool(cfg("OCR_USE_THRESH", True))
+    OCR_ADAPTIVE_BLOCK = int(cfg("OCR_ADAPTIVE_BLOCK", 31))
+    OCR_ADAPTIVE_C = int(cfg("OCR_ADAPTIVE_C", 10))
+    OCR_MEDIAN_BLUR = int(cfg("OCR_MEDIAN_BLUR", 3))
+    # Full-width horizontal line mode
+    OCR_FORCE_FULLWIDTH_LINES = bool(cfg("OCR_FORCE_FULLWIDTH_LINES", False))
+    OCR_FULLWIDTH_MIN_ROW_FRAC = float(cfg("OCR_FULLWIDTH_MIN_ROW_FRAC", 0.012))
+    OCR_FULLWIDTH_SMOOTH = int(cfg("OCR_FULLWIDTH_SMOOTH", 9))
+    OCR_FULLWIDTH_MERGE_GAP = int(cfg("OCR_FULLWIDTH_MERGE_GAP", 3))
+    OCR_FULLWIDTH_MIN_HEIGHT = int(cfg("OCR_FULLWIDTH_MIN_HEIGHT", 12))
+    OCR_FULLWIDTH_MAX_ROW_FRAC = float(cfg("OCR_FULLWIDTH_MAX_ROW_FRAC", 0.92))
+
     # Raw-only short-circuit: send original image to Tesseract with no preprocessing/resizing
-    if getattr(settings, "OCR_RAW_ONLY", False):
+    if OCR_RAW_ONLY:
         # Prepare simple, non-destructive variants
         rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         inv = cv2.bitwise_not(gray)
         variants = [("rgb", rgb), ("gray", gray), ("inv", inv)]
-        # Build common config parts from settings
-        oem = int(getattr(settings, "OCR_OEM", 1))
-        whitelist = getattr(settings, "OCR_CHAR_WHITELIST", "") if getattr(settings, "OCR_USE_WHITELIST", True) else ""
-        dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if getattr(settings, "OCR_DISABLE_DICTIONARY", False) else ""
-        spaces_flag = "-c preserve_interword_spaces=1" if getattr(settings, "OCR_PRESERVE_SPACES", True) else ""
-        dpi_flag = f"--dpi {int(getattr(settings, 'OCR_USER_DPI', 300))}"
+        # Build common config parts from settings/overrides
+        oem = OCR_OEM
+        whitelist = OCR_CHAR_WHITELIST if OCR_USE_WHITELIST else ""
+        dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+        spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+        dpi_flag = f"--dpi {OCR_USER_DPI}"
 
         def run_raw(img_variant: np.ndarray, psm: int) -> Dict[str, Any]:
             config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag}"
             if whitelist:
                 config += f" -c tessedit_char_whitelist={whitelist}"
             pil_img = Image.fromarray(img_variant)
-            data = pytesseract.image_to_data(pil_img, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+            data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
             words: List[Dict[str, Any]] = []
             lines_map: Dict[tuple, List[int]] = {}
             all_lines_text: Dict[tuple, List[str]] = {}
@@ -152,7 +121,7 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
                     conf = int(data.get('conf', ["-1"])[i])
                 except Exception:
                     conf = -1
-                if conf < settings.RECEIPT_CONF_THRESHOLD:
+                if conf < RECEIPT_CONF_THRESHOLD:
                     continue
                 left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
                 block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
@@ -178,16 +147,19 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             }
 
         best: Optional[Dict[str, Any]] = None
-        psms = [int(p.strip()) for p in str(getattr(settings, 'OCR_PSMS', '6,4,11,3,7')).split(',') if p.strip().isdigit()]
+        best_score: float = -1e9
+        psms = OCR_PSMS
         for vname, vimg in variants:
             for psm in psms:
                 res = run_raw(vimg, psm)
-                if settings.DEBUG:
-                    logger.debug("RAW OCR variant=%s psm=%d words=%d", vname, psm, len(res['words']))
-                if best is None or len(res['words']) > len(best['words']):
+                score = float(len(res['words'])) + OCR_SCORE_LINES_WEIGHT * float(len(res['lines']))
+                if DEBUG:
+                    logger.debug("RAW OCR variant=%s psm=%d words=%d lines=%d score=%.2f", vname, psm, len(res['words']), len(res['lines']), score)
+                if best is None or score > best_score:
                     best = res
+                    best_score = score
         result = best if best is not None else run_raw(rgb, 6)
-        if settings.DEBUG and debug_basename:
+        if DEBUG and debug_basename:
             try:
                 out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
                 cv2.imwrite(str(out), result['proc_image'])
@@ -204,32 +176,161 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
         scale = float(target_max) / float(m)
         return cv2.resize(img, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_CUBIC)
 
+    # If forcing full-width horizontal bands, do that specialized path first and return
+    if OCR_FORCE_FULLWIDTH_LINES:
+        def _segment_fullwidth_bands(gray_img: np.ndarray) -> List[tuple[int, int]]:
+            # Compute horizontal projection of ink pixels, detect bands, merge small gaps.
+            if gray_img.ndim != 2:
+                g = cv2.cvtColor(gray_img, cv2.COLOR_BGR2GRAY)
+            else:
+                g = gray_img
+            H, W = g.shape
+            # Light binarization to detect ink; Otsu or adaptive
+            try:
+                _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            except Exception:
+                bw = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 31, 10)
+            ink = (255 - bw)  # text=white
+            # A touch of vertical dilation helps connect characters within a line
+            try:
+                k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 2))
+                ink = cv2.dilate(ink, k, iterations=1)
+            except Exception:
+                pass
+            row_counts = ink.sum(axis=1) / 255.0  # approx count of ink pixels per row
+            # Smooth
+            k = max(1, OCR_FULLWIDTH_SMOOTH)
+            if k > 1:
+                kernel = np.ones(k, dtype=np.float32) / float(k)
+                row_counts = np.convolve(row_counts, kernel, mode='same')
+            min_thresh = OCR_FULLWIDTH_MIN_ROW_FRAC * float(W)
+            max_thresh = OCR_FULLWIDTH_MAX_ROW_FRAC * float(W)
+            # Keep rows that are in the "texty" band: enough ink, but not near-solid (like barcodes)
+            mask = (row_counts >= min_thresh) & (row_counts <= max_thresh)
+            # Find contiguous True runs
+            bands: List[tuple[int, int]] = []
+            in_band = False
+            start = 0
+            for y in range(H):
+                if mask[y] and not in_band:
+                    in_band = True
+                    start = y
+                elif not mask[y] and in_band:
+                    end = y - 1
+                    bands.append((start, end))
+                    in_band = False
+            if in_band:
+                bands.append((start, H - 1))
+            # Merge small gaps
+            merged: List[tuple[int, int]] = []
+            for b in bands:
+                if not merged:
+                    merged.append(b)
+                    continue
+                prev_s, prev_e = merged[-1]
+                if b[0] - prev_e - 1 <= OCR_FULLWIDTH_MERGE_GAP:
+                    merged[-1] = (prev_s, b[1])
+                else:
+                    merged.append(b)
+            # Enforce min height
+            merged = [b for b in merged if (b[1] - b[0] + 1) >= OCR_FULLWIDTH_MIN_HEIGHT]
+            return merged
+
+        # Prepare grayscale for stable coordinates and upscale if small
+        gray0 = _light_preprocess_for_tesseract(img_bgr)
+        gray0 = cv2.resize(gray0, (gray0.shape[1], gray0.shape[0]), interpolation=cv2.INTER_AREA)
+        gray = gray0
+        bands = _segment_fullwidth_bands(gray)
+        words: List[Dict[str, Any]] = []
+        lines_text: List[str] = []
+        line_ids: List[tuple] = []
+        block = 1
+        par = 1
+        for i, (y0, y1) in enumerate(bands, start=1):
+            strip = gray[y0:y1+1, :]
+            pil_img = Image.fromarray(strip)
+            # PSM 7: treat the image as a single text line
+            whitelist = OCR_CHAR_WHITELIST if OCR_USE_WHITELIST else ""
+            dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+            spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+            dpi_flag = f"--dpi {OCR_USER_DPI}"
+            config = f"--oem {OCR_OEM} --psm 7 {dpi_flag} {spaces_flag} {dict_flag}"
+            if whitelist:
+                config += f" -c tessedit_char_whitelist={whitelist}"
+            data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+            n = len(data.get('text', []))
+            lid = (block, par, i)
+            line_tokens: List[str] = []
+            row_words_idx: List[int] = []
+            for j in range(n):
+                txt = (data['text'][j] or '').strip()
+                if not txt:
+                    continue
+                try:
+                    conf = int(data.get('conf', ["-1"])[j])
+                except Exception:
+                    conf = -1
+                if conf < RECEIPT_CONF_THRESHOLD:
+                    continue
+                left, top, width, height = data['left'][j], data['top'][j], data['width'][j], data['height'][j]
+                # Map strip coords back to full image coords
+                full_top = int(top) + int(y0)
+                wdict = {
+                    'text': txt,
+                    'left': int(left),
+                    'top': full_top,
+                    'width': int(width),
+                    'height': int(height),
+                    'line_id': lid,
+                }
+                row_words_idx.append(len(words))
+                words.append(wdict)
+                line_tokens.append(txt)
+            line_ids.append(lid)
+            lines_text.append(" ".join(line_tokens))
+        text = "\n".join(lines_text)
+        result = {
+            'text': text,
+            'lines': lines_text,
+            'words': words,
+            'line_ids': line_ids,
+            'size': (gray.shape[1], gray.shape[0]),
+            'proc_image': cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+        }
+        if DEBUG and debug_basename is not None:
+            try:
+                out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
+                cv2.imwrite(str(out), gray)
+            except Exception:
+                pass
+        return result
+
     # Build preprocess variants
     gray = _light_preprocess_for_tesseract(img_bgr)
     gray = upscale_if_small(gray)
     variants = [("gray", gray)]
     # Optional Variant B: adaptive threshold + opening + optional median blur to reduce speckle
-    if getattr(settings, "OCR_USE_THRESH", True):
+    if OCR_USE_THRESH:
         try:
-            block = int(getattr(settings, "OCR_ADAPTIVE_BLOCK", 31))
+            block = int(OCR_ADAPTIVE_BLOCK)
             if block % 2 == 0:
                 block += 1
-            cval = int(getattr(settings, "OCR_ADAPTIVE_C", 10))
+            cval = int(OCR_ADAPTIVE_C)
             th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, cval)
             kernel = np.ones((2, 2), np.uint8)
             opened = cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel)
-            mblur = int(getattr(settings, "OCR_MEDIAN_BLUR", 3))
+            mblur = int(OCR_MEDIAN_BLUR)
             if mblur >= 3 and (mblur % 2 == 1):
                 opened = cv2.medianBlur(opened, mblur)
             variants.append(("thresh", opened))
         except Exception as e:
             logger.debug("Adaptive threshold failed: %s", e)
-    psms = [6, 4, 11, 7, 3]
+    psms = OCR_PSMS if OCR_PSMS else [6, 4, 11, 7, 3]
 
     def run_ocr(img_single: np.ndarray, psm: int) -> Dict[str, Any]:
         pil_img = Image.fromarray(img_single)
-        config = f"--oem 1 --psm {psm} -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&@%+#*"
-        data = pytesseract.image_to_data(pil_img, lang=settings.TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
+        config = f"--oem 1 --psm {psm} -c tessedit_char_whitelist={OCR_CHAR_WHITELIST}"
+        data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
         words: List[Dict[str, Any]] = []
         lines_map: Dict[tuple, List[int]] = {}
         all_lines_text: Dict[tuple, List[str]] = {}
@@ -242,7 +343,7 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
                 conf = int(data.get('conf', ["-1"])[i])
             except Exception:
                 conf = -1
-            if conf < settings.RECEIPT_CONF_THRESHOLD:
+            if conf < RECEIPT_CONF_THRESHOLD:
                 continue
             left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
             block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
@@ -272,18 +373,20 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     best: Optional[Dict[str, Any]] = None
     best_meta = ("", 0)
     best_image: Optional[np.ndarray] = None
+    best_score: float = -1e9
     for vname, vimg in variants:
         for psm in psms:
             result = run_ocr(vimg, psm)
-            score = len(result['words'])
-            if settings.DEBUG:
-                logger.debug("OCR variant=%s psm=%d words=%d", vname, psm, score)
-            if best is None or score > len(best['words']):
+            score = float(len(result['words'])) + OCR_SCORE_LINES_WEIGHT * float(len(result['lines']))
+            if DEBUG:
+                logger.debug("OCR variant=%s psm=%d words=%d lines=%d score=%.2f", vname, psm, len(result['words']), len(result['lines']), score)
+            if best is None or score > best_score:
                 best = result
                 best_meta = (vname, psm)
                 best_image = vimg
+                best_score = score
 
-    if settings.DEBUG and debug_basename and best_image is not None:
+    if DEBUG and debug_basename and best_image is not None:
         try:
             out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
             cv2.imwrite(str(out), best_image)
@@ -301,7 +404,7 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     best['proc_image'] = best_image if best_image is not None else gray
     return best
 
-
+# Draw utility: renders all word boxes and optionally highlights specific line_ids (date/payee/total).
 def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], line_ids: List[tuple],
                           highlights: Dict[str, tuple]) -> np.ndarray:
     """Draw word boxes and highlight selected line_ids on a provided image.
@@ -378,19 +481,6 @@ def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], lin
             cv2.putText(canvas, label, (tx + 4, ty - 4), font, font_scale, (255, 255, 255), text_thickness, cv2.LINE_AA)
     return canvas
 
-
-def ocr_image(image_path: str) -> Tuple[str, str]:
-    """
-    Run OCR on the image and return (raw_text, debug_text).
-    debug_text can include engine info or be same as raw_text for now.
-    """
-    # Use preprocessing but keep PIL interface for compatibility
-    if settings.DEBUG:
-        logger.info("OCR detailed start: %s", image_path)
-    proc = _preprocess_for_ocr(image_path)
-    pil = Image.fromarray(proc)
-    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ$€£.:,\\-/()&@%+#*"  # noqa: E501
-    text = pytesseract.image_to_string(pil, lang=settings.TESSERACT_LANG, config=config)
-    return text, text
+    
 
 

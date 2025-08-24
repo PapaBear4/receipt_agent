@@ -74,9 +74,10 @@ class Settings:
 
     # LLM (Ollama)
     OLLAMA_ENDPOINT: str = os.getenv("OLLAMA_ENDPOINT", "http://127.0.0.1:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+    #OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q4_0")
     #OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "granite3.3:8b")
-    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "2400")) # measured in seconds
+    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "3600")) # measured in seconds
 
     # LLM prompt sizing & content (env overridable)
     # If LLM_MAX_CHARS <= 0, do not truncate OCR text by characters.
@@ -97,34 +98,7 @@ class Settings:
     YNAB_BUDGET_ID: str | None = os.getenv("YNAB_BUDGET_ID")
     YNAB_DEFAULT_ACCOUNT_ID: str | None = os.getenv("YNAB_DEFAULT_ACCOUNT_ID")
 
-    # Receipt detection and OCR tuning (env overridable)
-    # Tip: export these before `python run.py` to experiment, e.g.:
-    #   export RECEIPT_MIN_ASPECT=0.5 RECEIPT_MIN_HEIGHT_RATIO=0.35
-    #   python run.py
-    #
-    # RECEIPT_TARGET_RESIZE_WIDTH: Resize width used during contour finding.
-    #   Larger -> more detail (slower). Smaller -> faster but less precise. Typical 800–1400.
-    RECEIPT_TARGET_RESIZE_WIDTH: int = int(os.getenv("RECEIPT_TARGET_RESIZE_WIDTH", "1000"))
-    # RECEIPT_MIN_HEIGHT_RATIO: Minimum candidate quad height vs resized image height to accept as the receipt.
-    #   Raise to avoid very short/flat regions (e.g., barcodes). Lower to accept smaller receipts. Typical 0.25–0.40.
-    RECEIPT_MIN_HEIGHT_RATIO: float = float(os.getenv("RECEIPT_MIN_HEIGHT_RATIO", "0.30"))
-    # RECEIPT_MIN_AREA_RATIO: Minimum candidate area fraction relative to resized image.
-    #   Raise to avoid tiny candidates; lower for small/zoomed-out receipts. Typical 0.05–0.20.
-    RECEIPT_MIN_AREA_RATIO: float = float(os.getenv("RECEIPT_MIN_AREA_RATIO", "0.10"))
-    # RECEIPT_MIN_ASPECT: Minimum height/width ratio for the quad (filters extremely flat shapes like barcodes).
-    #   Raise (e.g., 0.5) to be stricter against barcodes; lower (e.g., 0.3) for narrow/tall receipts.
-    RECEIPT_MIN_ASPECT: float = float(os.getenv("RECEIPT_MIN_ASPECT", "0.40"))  # height/width
-    # Fallback selection thresholds if a clean quad isn't found.
-    # RECEIPT_FALLBACK_MIN_HEIGHT_RATIO: Accept bounding boxes only if tall enough.
-    RECEIPT_FALLBACK_MIN_HEIGHT_RATIO: float = float(os.getenv("RECEIPT_FALLBACK_MIN_HEIGHT_RATIO", "0.25"))
-    # RECEIPT_FALLBACK_MIN_ASPECT: Accept bounding boxes only if not too flat.
-    RECEIPT_FALLBACK_MIN_ASPECT: float = float(os.getenv("RECEIPT_FALLBACK_MIN_ASPECT", "0.30"))
-    # Padding around fallback crop (as fraction of image dims) and minimum absolute padding in pixels.
-    RECEIPT_PAD_W: float = float(os.getenv("RECEIPT_PAD_W", "0.02"))  # as fraction of width
-    RECEIPT_PAD_H: float = float(os.getenv("RECEIPT_PAD_H", "0.04"))  # as fraction of height
-    RECEIPT_PAD_MIN: int = int(os.getenv("RECEIPT_PAD_MIN", "20"))
-    # Final fallback: vertical center band if detection completely fails; this is the top/bottom margin fraction.
-    RECEIPT_BAND_TOP: float = float(os.getenv("RECEIPT_BAND_TOP", "0.10"))  # fallback vertical band margin
+    # OCR tuning (env overridable)
     # Tesseract word confidence threshold; raise to suppress noisy words, lower to capture more.
     # MVP: be permissive to avoid missing text.
     RECEIPT_CONF_THRESHOLD: int = int(os.getenv("RECEIPT_CONF_THRESHOLD", "0"))
@@ -158,6 +132,26 @@ class Settings:
     OCR_PRESERVE_SPACES: bool = os.getenv("OCR_PRESERVE_SPACES", "true").lower() in {"1", "true", "yes"}
     # DPI hint for Tesseract; camera images benefit from a higher user-defined DPI
     OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "350"))
+    # Selection scoring weight: favor OCR variants that yield more distinct lines
+    # Score = words + (OCR_SCORE_LINES_WEIGHT * lines). Increase to penalize merged lines.
+    OCR_SCORE_LINES_WEIGHT: float = float(os.getenv("OCR_SCORE_LINES_WEIGHT", "0.5"))
+
+    # Experimental: force OCR to operate on horizontal, full-width bands from top to bottom
+    # When enabled, we segment the image into horizontal strips spanning the entire width,
+    # then run Tesseract on each strip as a single line (PSM 7). Useful when default page
+    # segmentation merges columns or skips narrow lines.
+    OCR_FORCE_FULLWIDTH_LINES: bool = os.getenv("OCR_FORCE_FULLWIDTH_LINES", "false").lower() in {"1", "true", "yes"}
+    # Minimum number of "ink" pixels per row, as a fraction of image width, to consider it part of a line
+    OCR_FULLWIDTH_MIN_ROW_FRAC: float = float(os.getenv("OCR_FULLWIDTH_MIN_ROW_FRAC", "0.012"))
+    # Optional: rows above this ink fraction are ignored (helps skip barcode stripes)
+    OCR_FULLWIDTH_MAX_ROW_FRAC: float = float(os.getenv("OCR_FULLWIDTH_MAX_ROW_FRAC", "0.92"))
+    # Smoothing window (rows) for the horizontal projection profile; odd number recommended
+    # Default 9; override with OCR_FULLWIDTH_SMOOTH if provided
+    OCR_FULLWIDTH_SMOOTH: int = int(os.getenv("OCR_FULLWIDTH_SMOOTH", "9"))
+    # Merge short gaps (rows) between bands to prevent over-segmentation
+    OCR_FULLWIDTH_MERGE_GAP: int = int(os.getenv("OCR_FULLWIDTH_MERGE_GAP", "3"))
+    # Minimum band height (rows) to keep
+    OCR_FULLWIDTH_MIN_HEIGHT: int = int(os.getenv("OCR_FULLWIDTH_MIN_HEIGHT", "12"))
 
 
 settings = Settings()

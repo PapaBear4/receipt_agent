@@ -32,33 +32,11 @@ Guidance:
 - Parse purchase date (prefer MM/DD/YYYY; best-effort otherwise).
 - Determine final total charged; fill payment breakouts if present.
 - Payment method and last 4 digits of the card when available.
+Input format notes:
+- You may receive OCR TEXT (raw multi-line text) and/or OCR LINES (indexed) below.
+- OCR LINES are shown as "i: <text>" where i starts at 0 and increases in reading order (top-to-bottom, left-to-right).
+- When referencing a specific line from OCR LINES, use its index number; do not invent indices that are not shown.
 Return only JSON.
-"""
-)
-
-ITEMS_PROMPT_PREAMBLE = (
-        """
-You are extracting ITEM LINES from a receipt using OCR LINES (indexed).
-Use this context to avoid misclassifying totals as items:
-PAYEE: {payee}
-DATE: {date}
-TOTAL_HINT: {total}
-PAYMENT: method={method} last4={last4}
-
-Return ONLY valid JSON in this exact shape:
-{
-    "items": [
-        {"line_index": -1, "ocr_text": "", "name": "", "qty": 0.0, "unit_price": 0.0, "amount": 0.0, "confidence": 0.0}
-    ]
-}
-
-Rules for items:
-- Map each item to the appropriate line_index from OCR LINES; set ocr_text to the related text (you may combine adjacent lines when an item spans multiple lines).
-- Merge multi-line items where quantity/weight/unit-price are on separate lines (common for produce and weighed goods).
-- Handle multi-quantity patterns (e.g., "x3", "3 @ 0.99", or "3 for 2.99"). Compute qty, unit_price, and amount accordingly.
-- For multi-line items return only the first line_index.
-- Ignore non-item lines like headers, SUBTOTAL, TAX, TOTAL, and payment details.
-- Provide your guess confidence for each item. Confidence is a sliding range from 0.0–1.0.
 """
 )
 
@@ -101,7 +79,7 @@ def ollama_health() -> Dict[str, object]:
         info["error"] = str(e)
     return info
 
-def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None) -> Dict:
+def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict:
     """Two-pass LLM extraction: pass 1 (meta), pass 2 (items), then combine.
 
     On any failure, returns empty defaults so the UI can allow manual entry.
@@ -125,16 +103,21 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
 
         ocr_lines_clean = [ln for ln in (ocr_lines or []) if _looks_useful(ln)]
 
-        max_chars = int(getattr(settings, "LLM_MAX_CHARS", 0))
+        def cfg(name: str, default: Any = None) -> Any:
+            if overrides is not None and name in overrides:
+                return overrides[name]
+            return getattr(settings, name, default)
+
+        max_chars = int(cfg("LLM_MAX_CHARS", getattr(settings, "LLM_MAX_CHARS", 0) or 0))
         if max_chars and max_chars > 0 and len(ocr_clean) > max_chars:
             ocr_snippet = ocr_clean[:max_chars]
         else:
             ocr_snippet = ocr_clean
 
-        used_model = settings.OLLAMA_MODEL
-        max_lines = int(getattr(settings, "LLM_MAX_LINES", 250))
-        include_full_text = bool(getattr(settings, "LLM_INCLUDE_FULL_TEXT", True))
-        only_indexed_when_long = bool(getattr(settings, "LLM_ONLY_INDEXED_WHEN_LONG", True))
+        used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
+        max_lines = int(cfg("LLM_MAX_LINES", 250))
+        include_full_text = bool(cfg("LLM_INCLUDE_FULL_TEXT", True))
+        only_indexed_when_long = bool(cfg("LLM_ONLY_INDEXED_WHEN_LONG", True))
 
         # Build OCR lines preview block
         lines_block = ""
@@ -157,14 +140,19 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         prompt_meta = "\n\n".join([p for p in prompt_parts_meta if p]) + "\n"
         meta_chars = len(prompt_meta)
         meta_lines = prompt_meta.count("\n") + 1
-        prep_sec = max(0.0, time.perf_counter() - tprep0)
+        _ = max(0.0, time.perf_counter() - tprep0)  # prep time measured but not used directly here
 
         url = f"{settings.OLLAMA_ENDPOINT}/api/generate"
         t0 = time.perf_counter()
-        r1 = _http_post(url, {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"}, settings.OLLAMA_TIMEOUT)
+        r1 = _http_post(
+            url,
+            {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"},
+            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
+        )
         r1.raise_for_status()
         d1 = r1.json()
         t1 = time.perf_counter()
+
         text_meta = (d1.get("response", "") or "").strip()
         # Robust JSON extract
         try:
@@ -203,6 +191,10 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             f"DATE: {date}\n"
             f"TOTAL_HINT: {total}\n"
             f"PAYMENT: method={payment.get('method','')} last4={payment.get('last4','')}\n\n"
+            "Input format:\n"
+            "- OCR LINES are provided as 'i: <text>' where i starts at 0 in reading order (top-to-bottom, left-to-right).\n"
+            "- Use only indices present in OCR LINES; do not invent numbers.\n"
+            "- If an item spans multiple adjacent lines, set line_index to the first line's index and set ocr_text to the concatenation (or best summary) of those lines.\n\n"
             "Return ONLY valid JSON in this exact shape:\n"
             "{\n"
             '    "items": [\n'
@@ -217,6 +209,7 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             "- Ignore non-item lines like headers, SUBTOTAL, TAX, TOTAL, and payment details.\n"
             "- Provide your guess confidence for each item. Confidence is a sliding range from 0.0–1.0.\n"
         )
+
         prompt_parts_items: List[str] = [items_preamble]
         if include_full_text and not (only_indexed_when_long and long_input):
             prompt_parts_items.append("\nOCR TEXT:\n" + (ocr_snippet or ""))
@@ -225,10 +218,15 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         prompt_items = "\n\n".join([p for p in prompt_parts_items if p]) + "\n"
 
         t2 = time.perf_counter()
-        r2 = _http_post(url, {"model": used_model, "prompt": prompt_items, "stream": False, "format": "json"}, settings.OLLAMA_TIMEOUT)
+        r2 = _http_post(
+            url,
+            {"model": used_model, "prompt": prompt_items, "stream": False, "format": "json"},
+            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
+        )
         r2.raise_for_status()
         d2 = r2.json()
         t3 = time.perf_counter()
+
         text_items = (d2.get("response", "") or "").strip()
         try:
             s2 = text_items.find("{")
@@ -236,21 +234,26 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             items_obj = json.loads(text_items[s2:e2+1] if s2 != -1 and e2 != -1 else text_items)
         except Exception:
             items_obj = {}
+
         items_raw = items_obj.get("items") or []
         items: List[Dict[str, Any]] = []
         if isinstance(items_raw, list):
             for it in items_raw:
                 if not isinstance(it, dict):
                     continue
-                items.append({
-                    "line_index": int(it.get("line_index", -1) or -1),
-                    "ocr_text": str(it.get("ocr_text", "") or ""),
-                    "name": str(it.get("name", "") or ""),
-                    "qty": float(it.get("qty", 0.0) or 0.0),
-                    "unit_price": float(it.get("unit_price", 0.0) or 0.0),
-                    "amount": float(it.get("amount", 0.0) or 0.0),
-                    "confidence": float(it.get("confidence", 0.0) or 0.0),
-                })
+                try:
+                    items.append({
+                        "line_index": int(it.get("line_index", -1) or -1),
+                        "ocr_text": str(it.get("ocr_text", "") or ""),
+                        "name": str(it.get("name", "") or ""),
+                        "qty": float(it.get("qty", 0.0) or 0.0),
+                        "unit_price": float(it.get("unit_price", 0.0) or 0.0),
+                        "amount": float(it.get("amount", 0.0) or 0.0),
+                        "confidence": float(it.get("confidence", 0.0) or 0.0),
+                    })
+                except Exception:
+                    # Skip malformed entries
+                    continue
 
         # Metrics (aggregate light-weight)
         def _dur(ns):
@@ -295,7 +298,6 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 "items_eval_sec": _dur(d2.get("eval_duration")),
             },
         }
-
         return {"date": date, "payee": payee, "total": total, "payment": payment, "items": items, "metrics": metrics}
     except requests.exceptions.RequestException as e:
         logging.error("LLM HTTP error: %s", e)
@@ -304,7 +306,7 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         logging.error("LLM extraction failed: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}, "items": []}
 
-def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None) -> Dict:
+def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict:
     """Extract only header/meta fields quickly (date, payee, total, payment).
 
     Returns keys: date, payee, total, payment, metrics(optional).
@@ -315,6 +317,7 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
         raw_no_cr = raw.replace("\r", "")
         raw_lines_list = raw_no_cr.split("\n")
         ocr_clean = "\n".join([" ".join(part.split()) for part in raw_lines_list]).strip()
+
         def _looks_useful(line: str) -> bool:
             if not line:
                 return False
@@ -322,16 +325,25 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
             if len(s) <= 1:
                 return False
             return any(c.isdigit() for c in s) or any(ch in s for ch in "$€£%") or len(s) >= 4
+
         ocr_lines_clean = [ln for ln in (ocr_lines or []) if _looks_useful(ln)]
-        max_chars = int(getattr(settings, "LLM_MAX_CHARS", 0))
+
+        def cfg(name: str, default: Any = None) -> Any:
+            if overrides is not None and name in overrides:
+                return overrides[name]
+            return getattr(settings, name, default)
+
+        max_chars = int(cfg("LLM_MAX_CHARS", getattr(settings, "LLM_MAX_CHARS", 0) or 0))
         if max_chars and max_chars > 0 and len(ocr_clean) > max_chars:
             ocr_snippet = ocr_clean[:max_chars]
         else:
             ocr_snippet = ocr_clean
-        used_model = settings.OLLAMA_MODEL
-        max_lines = int(getattr(settings, "LLM_MAX_LINES", 250))
-        include_full_text = bool(getattr(settings, "LLM_INCLUDE_FULL_TEXT", True))
-        only_indexed_when_long = bool(getattr(settings, "LLM_ONLY_INDEXED_WHEN_LONG", True))
+
+        used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
+        max_lines = int(cfg("LLM_MAX_LINES", 250))
+        include_full_text = bool(cfg("LLM_INCLUDE_FULL_TEXT", True))
+        only_indexed_when_long = bool(cfg("LLM_ONLY_INDEXED_WHEN_LONG", True))
+
         # Lines block
         lines_block = ""
         included_lines_count = 0
@@ -341,6 +353,7 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
                 preview_lines = preview_lines[:max_lines]
             included_lines_count = len(preview_lines)
             lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
+
         # Build prompt
         long_input = (max_chars and len(ocr_clean) >= max_chars) or (max_lines and len(ocr_lines_clean) >= max_lines)
         prompt_parts_meta: List[str] = [META_PROMPT]
@@ -352,14 +365,20 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
         include_full_text_effective = bool(include_full_text and not (only_indexed_when_long and long_input))
         prompt_chars = len(prompt_meta)
         prompt_line_count = prompt_meta.count("\n") + 1
-        prep_sec = max(0.0, time.perf_counter() - tprep0)
+        _ = max(0.0, time.perf_counter() - tprep0)
+
         # Call LLM
         url = f"{settings.OLLAMA_ENDPOINT}/api/generate"
         t0 = time.perf_counter()
-        resp = _http_post(url, {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"}, settings.OLLAMA_TIMEOUT)
+        resp = _http_post(
+            url,
+            {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"},
+            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
+        )
         resp.raise_for_status()
         data = resp.json()
         t1 = time.perf_counter()
+
         text = (data.get("response", "") or "").strip()
         # Parse
         obj: Dict[str, Any] = {}
@@ -369,11 +388,13 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
             obj = json.loads(text[s:e+1] if s != -1 and e != -1 else text)
         except Exception:
             obj = {}
+
         def _f(x) -> float:
             try:
                 return float(x)
             except Exception:
                 return 0.0
+
         date = str(obj.get("date", "") or "").strip()
         payee = str(obj.get("payee", "") or "").strip()
         total = _f(obj.get("total", 0))
@@ -387,17 +408,20 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None)
             "method": str(psrc.get("method", "") or ""),
             "last4": str(psrc.get("last4", "") or ""),
         }
+
         # Metrics (minimal)
         prompt_tokens = data.get("prompt_eval_count")
         completion_tokens = data.get("eval_count")
         total_ns = data.get("total_duration") or 0
         eval_ns = data.get("eval_duration") or 0
         prompt_eval_ns = data.get("prompt_eval_duration") or 0
+
         def _dur(ns):
             try:
                 return (float(ns)/1e9) if ns else None
             except Exception:
                 return None
+
         metrics = {
             "prompt": {
                 "chars": prompt_chars,

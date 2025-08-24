@@ -1,0 +1,209 @@
+{% set sel = selected or '' %}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <title>Receipt Lab</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem 2rem; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; }
+    fieldset { border: 1px solid #ccc; padding: 12px; border-radius: 6px; }
+    legend { padding: 0 6px; font-weight: 600; }
+  .field label { display: block; font-size: 12px; color: #333; margin-bottom: 2px; }
+  .hint { font-size: 11px; color: #666; margin-top: 2px; display: block; }
+  input[type=text], input[type=number], select { width: 100%; padding: 6px 8px; }
+  input[type=checkbox] { transform: scale(1.1); vertical-align: middle; }
+  .checks { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 8px 16px; align-items: center; }
+  .checks label { font-size: 13px; color: #222; }
+    .row { display: flex; gap: 20px; align-items: flex-start; }
+    .col { flex: 1; }
+    pre { background: #fafafa; border: 1px solid #eee; padding: 8px; max-height: 420px; overflow: auto; }
+    img { max-width: 100%; height: auto; border: 1px solid #eee; }
+    .note { color: #555; font-size: 12px; }
+    .pill { display:inline-block; padding: 2px 6px; border-radius: 999px; background:#eef; border:1px solid #ccd; font-size: 12px; }
+    .kv { font-size: 12px; color:#444; }
+  .actions { display:flex; gap:10px; align-items:center; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Receipt Lab</h1>
+    <nav>
+      <a href="/">Home</a>
+      &nbsp;|&nbsp;
+      <a href="/upload">Upload</a>
+      &nbsp;|&nbsp;
+      <a href="/jobs">Jobs</a>
+    </nav>
+  </header>
+
+  <form method="post" action="/lab/preview">
+    <fieldset>
+      <legend>Inputs</legend>
+      <div class="grid-2">
+        <div class="field">
+          <label for="filename">Uploaded file</label>
+          <select id="filename" name="filename">
+            {% for f in uploads %}
+              <option value="{{f}}" {% if f == sel %}selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Model <span class="hint">Set the exact model tag (e.g. llama3.1:8b-instruct-q4_0). Use an available one below.</span></label>
+          <input type="text" name="OLLAMA_MODEL" value="{{ defaults.OLLAMA_MODEL }}" placeholder="e.g. llama3.1:8b-instruct-q4_0" />
+          <div class="note">Available: {{ (ollama.available_models or []) | join(', ') }}</div>
+        </div>
+        <div class="field">
+          <label>Timeout (s) <span class="hint">Increase if the model is slow; lower for faster failures.</span></label>
+          <input type="number" name="OLLAMA_TIMEOUT" step="1" min="1" value="{{ defaults.OLLAMA_TIMEOUT }}" />
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="row">
+      <fieldset class="col">
+        <legend>OCR</legend>
+        <div class="checks">
+          <label title="Skip preprocessing and feed the original image variants to Tesseract."><input type="checkbox" name="OCR_RAW_ONLY" {% if defaults.OCR_RAW_ONLY %}checked{% endif %}/> Raw only (no preprocess)</label>
+          <label title="Restrict recognition to a safe set of characters to reduce noise."><input type="checkbox" name="OCR_USE_WHITELIST" {% if defaults.OCR_USE_WHITELIST %}checked{% endif %} /> Use whitelist</label>
+          <label title="Helps keep spaces between words; may increase noise in some cases."><input type="checkbox" name="OCR_PRESERVE_SPACES" {% if defaults.OCR_PRESERVE_SPACES %}checked{% endif %} /> Preserve spaces</label>
+          <label title="Enables adaptive threshold variant in preprocessing."><input type="checkbox" name="OCR_USE_THRESH" {% if defaults.OCR_USE_THRESH %}checked{% endif %} /> Adaptive threshold</label>
+          <label title="Disables Tesseract's language dictionary for more raw character picks."><input type="checkbox" name="OCR_DISABLE_DICTIONARY" {% if defaults.OCR_DISABLE_DICTIONARY %}checked{% endif %} /> Disable dictionary</label>
+          <label title="Segment image into full-width horizontal bands and OCR each as a single line (PSM 7). Useful when columns merge or lines are skipped."><input type="checkbox" name="OCR_FORCE_FULLWIDTH_LINES" {% if defaults.OCR_FORCE_FULLWIDTH_LINES %}checked{% endif %} /> Force full-width line mode</label>
+        </div>
+        <div class="grid-2" style="margin-top:10px;">
+          <div class="field">
+            <label>PSMs (comma) <span class="hint">Try 6 (uniform block), 4 (single column), 11 (sparse). Example: 11,6,4,3,7</span></label>
+            <input type="text" name="OCR_PSMS" value="{{ defaults.OCR_PSMS }}" placeholder="e.g. 11,6,4,3,7" />
+          </div>
+          <div class="field">
+            <label>User DPI <span class="hint">Hint for Tesseract; 300–600 is common. Higher can help tiny text.</span></label>
+            <input type="number" step="1" name="OCR_USER_DPI" value="{{ defaults.OCR_USER_DPI }}" />
+          </div>
+          <div class="field">
+            <label>Whitelist <span class="hint">Allowed characters. Leave blank to allow all.</span></label>
+            <input type="text" name="OCR_CHAR_WHITELIST" value="{{ defaults.OCR_CHAR_WHITELIST }}" placeholder="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ$%/.-" />
+          </div>
+          <div class="field">
+            <label>Score lines weight <span class="hint">Bias selection toward variants with more distinct lines. 0.0–1.0 typical.</span></label>
+            <input type="number" step="0.1" name="OCR_SCORE_LINES_WEIGHT" value="{{ defaults.OCR_SCORE_LINES_WEIGHT }}" />
+          </div>
+          <div class="field">
+            <label>Adaptive block <span class="hint">Odd window size for adaptive threshold (e.g. 31, 41).</span></label>
+            <input type="number" step="1" name="OCR_ADAPTIVE_BLOCK" value="{{ defaults.OCR_ADAPTIVE_BLOCK }}" />
+          </div>
+          <div class="field">
+            <label>Adaptive C <span class="hint">Constant subtracted in adaptive threshold; higher = darker result.</span></label>
+            <input type="number" step="1" name="OCR_ADAPTIVE_C" value="{{ defaults.OCR_ADAPTIVE_C }}" />
+          </div>
+          <div class="field">
+            <label>Median blur <span class="hint">Odd kernel. 0 to disable; 3 removes speckle, 5+ can soften.</span></label>
+            <input type="number" step="1" name="OCR_MEDIAN_BLUR" value="{{ defaults.OCR_MEDIAN_BLUR }}" />
+          </div>
+          <div class="field">
+            <label>Lang <span class="hint">Tesseract language code (e.g. eng). Multiple like "eng+spa".</span></label>
+            <input type="text" name="TESSERACT_LANG" value="{{ defaults.TESSERACT_LANG }}" placeholder="eng" />
+          </div>
+          <div class="field">
+            <label>Conf threshold <span class="hint">Filter out low-confidence words (0–100). Raise to drop noise.</span></label>
+            <input type="number" step="1" name="RECEIPT_CONF_THRESHOLD" value="{{ defaults.RECEIPT_CONF_THRESHOLD }}" />
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top:10px;">
+          <div class="field">
+            <label>Min row frac <span class="hint">Ink fraction per row to count as text (e.g. 0.008–0.02).</span></label>
+            <input type="number" step="0.001" name="OCR_FULLWIDTH_MIN_ROW_FRAC" value="{{ defaults.OCR_FULLWIDTH_MIN_ROW_FRAC }}" />
+          </div>
+          <div class="field">
+            <label>Smooth window <span class="hint">Rows for projection smoothing (odd). Higher merges nearby lines.</span></label>
+            <input type="number" step="1" name="OCR_FULLWIDTH_SMOOTH" value="{{ defaults.OCR_FULLWIDTH_SMOOTH }}" />
+          </div>
+          <div class="field">
+            <label>Max row frac <span class="hint">Upper ink fraction to keep (helps ignore barcodes), e.g. 0.9–0.98.</span></label>
+            <input type="number" step="0.01" name="OCR_FULLWIDTH_MAX_ROW_FRAC" value="{{ defaults.OCR_FULLWIDTH_MAX_ROW_FRAC }}" />
+          </div>
+          <div class="field">
+            <label>Merge gap <span class="hint">Max blank rows between bands to merge.</span></label>
+            <input type="number" step="1" name="OCR_FULLWIDTH_MERGE_GAP" value="{{ defaults.OCR_FULLWIDTH_MERGE_GAP }}" />
+          </div>
+          <div class="field">
+            <label>Min band height <span class="hint">Discard bands shorter than this many rows.</span></label>
+            <input type="number" step="1" name="OCR_FULLWIDTH_MIN_HEIGHT" value="{{ defaults.OCR_FULLWIDTH_MIN_HEIGHT }}" />
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="col">
+        <legend>LLM</legend>
+        <div class="checks">
+          <label title="Append the full OCR text to the prompt. Slower, but can improve recall."><input type="checkbox" name="LLM_INCLUDE_FULL_TEXT" {% if defaults.LLM_INCLUDE_FULL_TEXT %}checked{% endif %} /> Include full text in prompt</label>
+          <label title="When the prompt is too long, send only the numbered lines block to stay under limits."><input type="checkbox" name="LLM_ONLY_INDEXED_WHEN_LONG" {% if defaults.LLM_ONLY_INDEXED_WHEN_LONG %}checked{% endif %} /> Only indexed when long</label>
+        </div>
+        <div class="grid-2" style="margin-top:10px;">
+          <div class="field">
+            <label>Max lines <span class="hint">0 = no limit. Smaller focuses the header area.</span></label>
+            <input type="number" step="1" name="LLM_MAX_LINES" value="{{ defaults.LLM_MAX_LINES }}" />
+          </div>
+          <div class="field">
+            <label>Max chars <span class="hint">0 = auto. Hard cap for prompt size before truncation.</span></label>
+            <input type="number" step="1" name="LLM_MAX_CHARS" value="{{ defaults.LLM_MAX_CHARS }}" />
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="col">
+        <legend>About</legend>
+        <div class="kv">Endpoint: {{ defaults.OLLAMA_ENDPOINT }}</div>
+        <div class="kv">Model OK: {{ ollama.model_ok }}</div>
+        <div class="kv">Endpoint OK: {{ ollama.endpoint_ok }}</div>
+        {% if overrides %}
+        <div class="kv"><span class="pill">Overrides</span> Applied</div>
+        {% endif %}
+        {% if image_url %}
+        <p><a href="{{ image_url }}" target="_blank">Open original image</a></p>
+        {% endif %}
+        <p class="note">Submit without filling fields to use defaults. Checkboxes toggle true.</p>
+      </fieldset>
+    </div>
+
+    <!-- Hidden OCR payload passthrough for LLM-only submit -->
+    <input type="hidden" name="ocr_text" value="{{ ocr_text | default('') | e }}" />
+    <input type="hidden" name="ocr_lines_json" value="{{ ocr_lines_json | default('') | e }}" />
+
+    <p class="actions">
+      <button type="submit">Run OCR + LLM</button>
+      <button type="submit" formaction="/lab/ocr" title="Just run OCR with the settings above and preview the overlay.">Run OCR only</button>
+      <button type="submit" formaction="/lab/llm" title="Use the OCR text/lines currently shown to run only the LLM step.">Send to LLM</button>
+      <button type="reset" title="Revert all controls to defaults from config.py">Reset to defaults</button>
+    </p>
+  </form>
+
+  {% if overlay_url or result %}
+  <div class="row">
+    <div class="col">
+      <h3>Overlay</h3>
+      {% if overlay_url %}
+        <img src="{{ overlay_url }}" />
+      {% else %}
+        <div class="note">No overlay available.</div>
+      {% endif %}
+    </div>
+    <div class="col">
+      <h3>OCR</h3>
+      <pre>{{ (ocr.text or '') | e }}</pre>
+      <h4>Indexed lines</h4>
+  <pre>{% for line in (ocr.lines or []) %}{{ loop.index0 }}: {{ line }}
+{% endfor %}</pre>
+    </div>
+    <div class="col">
+      <h3>LLM Result</h3>
+      <pre>{{ result | tojson(indent=2) }}</pre>
+    </div>
+  </div>
+  {% endif %}
+</body>
+</html>

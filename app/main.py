@@ -12,11 +12,16 @@ import logging
 import json
 import hashlib
 import shutil
-from app.services.ocr import ocr_image
+from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.llm import extract_fields_from_text, ollama_health
 from app.services.jobs import job_manager, Job
 from app.services.db import init_db
-from app.services.ynab import YNABClient
+from app.services.ynab_service import (
+    get_settings_context,
+    get_meta_context,
+    set_selected_budget_id,
+    push_transaction,
+)
 from app.utils.csv_writer import CSVWriter
 from app.utils.date_utils import normalize_date_to_mmddyyyy
 from app.utils import parse_size, normalize_abstract_name, parse_date_to_unix
@@ -40,6 +45,7 @@ else:
 
 # Static mount for uploaded/processed images for preview
 app.mount("/data", StaticFiles(directory=str(settings.DATA_DIR)), name="data")
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
@@ -49,6 +55,15 @@ USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
 async def home(request: Request):
     return templates.TemplateResponse("home.html", {"request": request})
 
+
+@app.get("/favicon.ico")
+async def favicon_redirect():
+    # Serve SVG favicon from static
+    fav = Path(__file__).parent / "static" / "favicon.svg"
+    if fav.exists():
+        return FileResponse(str(fav), media_type="image/svg+xml")
+    return HTMLResponse(status_code=404, content="favicon not found")
+
 # --- Upload page ---
 @app.get("/upload", response_class=HTMLResponse)
 async def upload_page(request: Request):
@@ -57,116 +72,13 @@ async def upload_page(request: Request):
 # --- YNAB: Settings (GET) ---
 @app.get("/settings/ynab", response_class=HTMLResponse)
 async def settings_ynab(request: Request):
-    client = YNABClient()
-    configured = client.is_configured()
-    budgets = []
-    accounts = []
-    category_groups = []
-    payees = []
-    error = None
-    selected_budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
-    try:
-        if configured:
-            try:
-                data = client.budgets()
-                budgets = data.get("budgets", []) if isinstance(data, dict) else []
-            except Exception as e:
-                error = f"Failed to load budgets: {e}"
-            # Use first budget if none selected
-            if not selected_budget_id and budgets:
-                try:
-                    selected_budget_id = str(budgets[0].get("id") or "")
-                except Exception:
-                    selected_budget_id = ""
-            # Fetch per-budget data
-            if selected_budget_id:
-                try:
-                    ad = client.accounts(selected_budget_id)
-                    raw_accounts = ad.get("accounts", []) if isinstance(ad, dict) else []
-                    accounts = [a for a in raw_accounts if not a.get("closed")]
-                except Exception:
-                    pass
-                try:
-                    cd = client.categories(selected_budget_id)
-                    raw_groups = cd.get("category_groups", []) if isinstance(cd, dict) else []
-                    # Filter hidden/deleted categories
-                    for g in raw_groups:
-                        cats = [c for c in (g.get("categories", []) or []) if not c.get("hidden") and not c.get("deleted")]
-                        if cats:
-                            category_groups.append({"name": g.get("name"), "categories": cats})
-                except Exception:
-                    pass
-                try:
-                    pd = client.payees(selected_budget_id)
-                    payees = pd.get("payees", []) if isinstance(pd, dict) else []
-                except Exception:
-                    pass
-    except Exception as e:
-        error = str(e)
-    ctx = {
-        "request": request,
-        "configured": configured,
-        "budgets": budgets,
-        "selected_budget_id": selected_budget_id,
-        "accounts": accounts,
-        "category_groups": category_groups,
-        "payees": payees,
-        "error": error,
-    }
+    ctx = get_settings_context(request)
     return templates.TemplateResponse("settings_ynab.html", ctx)
 
 # --- YNAB: Metadata (GET) ---
 @app.get("/ynab/meta", response_class=HTMLResponse)
 async def ynab_meta(request: Request):
-    client = YNABClient()
-    configured = client.is_configured()
-    budgets = []
-    accounts = []
-    category_groups = []
-    error_budgets = None
-    error_accounts = None
-    error_categories = None
-    active_budget_id = (_load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID or "").strip()
-    default_account_id = settings.YNAB_DEFAULT_ACCOUNT_ID or ""
-    if configured:
-        try:
-            bd = client.budgets()
-            budgets = bd.get("budgets", []) if isinstance(bd, dict) else []
-        except Exception as e:
-            error_budgets = str(e)
-        if not active_budget_id and budgets:
-            try:
-                active_budget_id = str(budgets[0].get("id") or "")
-            except Exception:
-                active_budget_id = ""
-        if active_budget_id:
-            try:
-                ad = client.accounts(active_budget_id)
-                raw_accounts = ad.get("accounts", []) if isinstance(ad, dict) else []
-                accounts = [a for a in raw_accounts if not a.get("closed")]
-            except Exception as e:
-                error_accounts = str(e)
-            try:
-                cd = client.categories(active_budget_id)
-                raw_groups = cd.get("category_groups", []) if isinstance(cd, dict) else []
-                for g in raw_groups:
-                    cats = [c for c in (g.get("categories", []) or []) if not c.get("hidden") and not c.get("deleted")]
-                    if cats:
-                        category_groups.append({"name": g.get("name"), "categories": cats})
-            except Exception as e:
-                error_categories = str(e)
-    ctx = {
-        "request": request,
-        "configured": configured,
-        "budgets": budgets,
-        "accounts": accounts,
-        "category_groups": category_groups,
-        "active_budget_id": active_budget_id,
-        "default_account_id": default_account_id,
-        "error_budgets": error_budgets,
-        "error_accounts": error_accounts,
-        "error_categories": error_categories,
-    }
+    ctx = get_meta_context(request)
     return templates.TemplateResponse("ynab_meta.html", ctx)
 
 def _load_user_conf() -> dict:
@@ -200,9 +112,7 @@ async def _startup() -> None:
 
 @app.post("/settings/ynab")
 async def settings_ynab_save(budget_id: str = Form("")):
-    conf = _load_user_conf()
-    conf["ynab_budget_id"] = budget_id
-    _save_user_conf(conf)
+    set_selected_budget_id(budget_id)
     return RedirectResponse(url="/settings/ynab", status_code=303)
 
 
@@ -216,35 +126,15 @@ async def ynab_push(
     account_id: str = Form("") ,
     category_id: str = Form("") ,
 ):
-    client = YNABClient()
-    if not client.is_configured():
-        return {"ok": False, "error": "YNAB not configured"}
-    bid = _load_user_conf().get("ynab_budget_id") or settings.YNAB_BUDGET_ID
-    if not bid:
-        return {"ok": False, "error": "YNAB_BUDGET_ID not set"}
-    acc = account_id or (settings.YNAB_DEFAULT_ACCOUNT_ID or "")
-    if not acc:
-        return {"ok": False, "error": "account_id required"}
-    try:
-        amt = float(outflow)
-    except Exception:
-        return {"ok": False, "error": "invalid amount"}
-    try:
-        iid = YNABClient.make_import_id(date, amt, stored_filename)
-        data = client.create_transaction(
-            bid,
-            acc,
-            date=date,
-            amount=amt,
-            payee_name=payee,
-            memo=memo,
-            category_id=(category_id or None),
-            import_id=iid,
-        )
-        tx = (data.get("transaction") or {}) if isinstance(data, dict) else {}
-        return {"ok": True, "transaction": tx}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return push_transaction(
+        stored_filename=stored_filename,
+        date=date,
+        payee=payee,
+        outflow=outflow,
+        memo=memo,
+        account_id=account_id,
+        category_id=category_id,
+    )
 
 
 @app.get("/metrics/llm.json")
@@ -335,15 +225,6 @@ async def admin_items(request: Request, abstract_id: Optional[int] = None):
         except Exception as e:
             logger.debug("Failed loading variants/prices: %s", e)
     return templates.TemplateResponse("items_admin.html", {"request": request, "items": items, "variants": variants, "abstract_id": abstract_id or 0, "prices": prices})
-
-
-"""
-All inline OCR/LLM processing for review has been removed to ensure LLM prompts run only in background jobs.
-"""
-
-
-
-
 
 
 def _load_cached_review_context(request: Request, stored_name: str, original_name: str) -> Optional[Dict[str, object]]:
@@ -678,7 +559,14 @@ async def save_receipt(
         logger.warning("Validation errors: %s", errors)
         # Re-render review with errors
         image_url = f"/data/uploads/{stored_filename}"
-        raw_text, _ = ocr_image(str(settings.UPLOADS_DIR / stored_filename))
+        # Compute raw_text via the robust OCR path for the uploaded image
+        try:
+            import cv2 as _cv2
+            img = _cv2.imread(str(settings.UPLOADS_DIR / stored_filename))
+            ocr = ocr_on_cropped_image(img, debug_basename=None, overrides=None) if img is not None else {'text': ''}
+            raw_text = ocr.get('text', '')
+        except Exception:
+            raw_text = ''
         return templates.TemplateResponse(
             "review.html",
             {
@@ -703,7 +591,13 @@ async def save_receipt(
         logger.exception("CSV write failed for %s: %s", settings.CSV_PATH, e)
         # Re-render review with error, do not copy to processed
         image_url = f"/data/uploads/{stored_filename}"
-        raw_text, _ = ocr_image(str(settings.UPLOADS_DIR / stored_filename))
+        try:
+            import cv2 as _cv2
+            img = _cv2.imread(str(settings.UPLOADS_DIR / stored_filename))
+            ocr = ocr_on_cropped_image(img, debug_basename=None, overrides=None) if img is not None else {'text': ''}
+            raw_text = ocr.get('text', '')
+        except Exception:
+            raw_text = ''
         return templates.TemplateResponse(
             "review.html",
             {
@@ -798,6 +692,522 @@ async def save_receipt(
 async def download_csv():
     logger.info("CSV download requested: %s", settings.CSV_PATH)
     return FileResponse(str(settings.CSV_PATH), media_type="text/csv", filename="ynab_receipts.csv")
+
+
+# --- Lab: Tuning UI ---
+@app.get("/lab", response_class=HTMLResponse)
+async def lab_get(request: Request):
+    # List uploaded files
+    uploads = []
+    try:
+        for p in sorted(settings.UPLOADS_DIR.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file():
+                uploads.append(p.name)
+    except Exception:
+        uploads = []
+    selected = uploads[0] if uploads else ""
+    ctx = {
+        "request": request,
+        "uploads": uploads,
+        "selected": selected,
+        "defaults": settings,
+        "result": None,
+        "ocr": None,
+        "overlay_url": None,
+        "ollama": ollama_health(),
+    }
+    return templates.TemplateResponse("lab.html", ctx)
+
+
+@app.post("/lab/preview", response_class=HTMLResponse)
+async def lab_preview(
+    request: Request,
+    filename: str = Form(...),
+    # OCR overrides
+    OCR_RAW_ONLY: Optional[str] = Form(None),
+    OCR_OEM: Optional[str] = Form(None),
+    OCR_USE_WHITELIST: Optional[str] = Form(None),
+    OCR_CHAR_WHITELIST: Optional[str] = Form(None),
+    OCR_DISABLE_DICTIONARY: Optional[str] = Form(None),
+    OCR_PRESERVE_SPACES: Optional[str] = Form(None),
+    OCR_USER_DPI: Optional[str] = Form(None),
+    OCR_PSMS: Optional[str] = Form(None),
+    OCR_SCORE_LINES_WEIGHT: Optional[str] = Form(None),
+    OCR_USE_THRESH: Optional[str] = Form(None),
+    OCR_ADAPTIVE_BLOCK: Optional[str] = Form(None),
+    OCR_ADAPTIVE_C: Optional[str] = Form(None),
+    OCR_MEDIAN_BLUR: Optional[str] = Form(None),
+    OCR_FORCE_FULLWIDTH_LINES: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MIN_ROW_FRAC: Optional[str] = Form(None),
+    OCR_FULLWIDTH_SMOOTH: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MAX_ROW_FRAC: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MERGE_GAP: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MIN_HEIGHT: Optional[str] = Form(None),
+    TESSERACT_LANG: Optional[str] = Form(None),
+    RECEIPT_CONF_THRESHOLD: Optional[str] = Form(None),
+    # LLM overrides
+    OLLAMA_MODEL: Optional[str] = Form(None),
+    LLM_MAX_LINES: Optional[str] = Form(None),
+    LLM_MAX_CHARS: Optional[str] = Form(None),
+    LLM_INCLUDE_FULL_TEXT: Optional[str] = Form(None),
+    LLM_ONLY_INDEXED_WHEN_LONG: Optional[str] = Form(None),
+    OLLAMA_TIMEOUT: Optional[str] = Form(None),
+):
+    # Build overrides dict with proper types
+    def to_bool(val: Optional[str]) -> bool:
+        if val is None:
+            return False
+        v = str(val).lower()
+        return v in ("1", "true", "on", "yes")
+
+    def to_int(val: Optional[str], default: Optional[int] = None) -> Optional[int]:
+        try:
+            return int(str(val)) if val is not None and str(val).strip() != "" else default
+        except Exception:
+            return default
+
+    def to_float(val: Optional[str], default: Optional[float] = None) -> Optional[float]:
+        try:
+            return float(str(val)) if val is not None and str(val).strip() != "" else default
+        except Exception:
+            return default
+
+    ocr_overrides: Dict[str, object] = {}
+    if OCR_RAW_ONLY is not None:
+        ocr_overrides["OCR_RAW_ONLY"] = to_bool(OCR_RAW_ONLY)
+    if OCR_OEM is not None:
+        ocr_overrides["OCR_OEM"] = to_int(OCR_OEM, settings.OCR_OEM)
+    if OCR_USE_WHITELIST is not None:
+        ocr_overrides["OCR_USE_WHITELIST"] = to_bool(OCR_USE_WHITELIST)
+    if OCR_CHAR_WHITELIST is not None:
+        ocr_overrides["OCR_CHAR_WHITELIST"] = str(OCR_CHAR_WHITELIST)
+    if OCR_DISABLE_DICTIONARY is not None:
+        ocr_overrides["OCR_DISABLE_DICTIONARY"] = to_bool(OCR_DISABLE_DICTIONARY)
+    if OCR_PRESERVE_SPACES is not None:
+        ocr_overrides["OCR_PRESERVE_SPACES"] = to_bool(OCR_PRESERVE_SPACES)
+    if OCR_USER_DPI is not None:
+        v = to_int(OCR_USER_DPI, settings.OCR_USER_DPI)
+        if v is not None:
+            ocr_overrides["OCR_USER_DPI"] = v
+    if OCR_PSMS is not None:
+        # Accept comma-separated ints
+        try:
+            arr = [int(x.strip()) for x in str(OCR_PSMS).split(',') if x.strip().isdigit()]
+            if arr:
+                ocr_overrides["OCR_PSMS"] = ",".join(str(x) for x in arr)
+        except Exception:
+            pass
+    if OCR_SCORE_LINES_WEIGHT is not None:
+        v = to_float(OCR_SCORE_LINES_WEIGHT, settings.OCR_SCORE_LINES_WEIGHT)
+        if v is not None:
+            ocr_overrides["OCR_SCORE_LINES_WEIGHT"] = v
+    if OCR_USE_THRESH is not None:
+        ocr_overrides["OCR_USE_THRESH"] = to_bool(OCR_USE_THRESH)
+    if OCR_ADAPTIVE_BLOCK is not None:
+        v = to_int(OCR_ADAPTIVE_BLOCK, settings.OCR_ADAPTIVE_BLOCK)
+        if v is not None:
+            ocr_overrides["OCR_ADAPTIVE_BLOCK"] = v
+    if OCR_ADAPTIVE_C is not None:
+        v = to_int(OCR_ADAPTIVE_C, settings.OCR_ADAPTIVE_C)
+        if v is not None:
+            ocr_overrides["OCR_ADAPTIVE_C"] = v
+    if OCR_MEDIAN_BLUR is not None:
+        v = to_int(OCR_MEDIAN_BLUR, settings.OCR_MEDIAN_BLUR)
+        if v is not None:
+            ocr_overrides["OCR_MEDIAN_BLUR"] = v
+    # Full-width line mode toggles/params
+    if OCR_FORCE_FULLWIDTH_LINES is not None:
+        ocr_overrides["OCR_FORCE_FULLWIDTH_LINES"] = to_bool(OCR_FORCE_FULLWIDTH_LINES)
+    if OCR_FULLWIDTH_MIN_ROW_FRAC is not None:
+        v = to_float(OCR_FULLWIDTH_MIN_ROW_FRAC, settings.OCR_FULLWIDTH_MIN_ROW_FRAC)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MIN_ROW_FRAC"] = v
+    if OCR_FULLWIDTH_SMOOTH is not None:
+        v = to_int(OCR_FULLWIDTH_SMOOTH, settings.OCR_FULLWIDTH_SMOOTH)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_SMOOTH"] = v
+    if OCR_FULLWIDTH_MAX_ROW_FRAC is not None:
+        v = to_float(OCR_FULLWIDTH_MAX_ROW_FRAC, settings.OCR_FULLWIDTH_MAX_ROW_FRAC)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MAX_ROW_FRAC"] = v
+    if OCR_FULLWIDTH_MERGE_GAP is not None:
+        v = to_int(OCR_FULLWIDTH_MERGE_GAP, settings.OCR_FULLWIDTH_MERGE_GAP)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MERGE_GAP"] = v
+    if OCR_FULLWIDTH_MIN_HEIGHT is not None:
+        v = to_int(OCR_FULLWIDTH_MIN_HEIGHT, settings.OCR_FULLWIDTH_MIN_HEIGHT)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MIN_HEIGHT"] = v
+    if TESSERACT_LANG is not None and TESSERACT_LANG.strip():
+        ocr_overrides["TESSERACT_LANG"] = TESSERACT_LANG.strip()
+    if RECEIPT_CONF_THRESHOLD is not None:
+        v = to_int(RECEIPT_CONF_THRESHOLD, settings.RECEIPT_CONF_THRESHOLD)
+        if v is not None:
+            ocr_overrides["RECEIPT_CONF_THRESHOLD"] = v
+
+    llm_overrides: Dict[str, object] = {}
+    if OLLAMA_MODEL is not None and OLLAMA_MODEL.strip():
+        llm_overrides["OLLAMA_MODEL"] = OLLAMA_MODEL.strip()
+    if LLM_MAX_LINES is not None:
+        v = to_int(LLM_MAX_LINES, None)
+        if v is not None:
+            llm_overrides["LLM_MAX_LINES"] = v
+    if LLM_MAX_CHARS is not None:
+        v = to_int(LLM_MAX_CHARS, None)
+        if v is not None:
+            llm_overrides["LLM_MAX_CHARS"] = v
+    if LLM_INCLUDE_FULL_TEXT is not None:
+        llm_overrides["LLM_INCLUDE_FULL_TEXT"] = to_bool(LLM_INCLUDE_FULL_TEXT)
+    if LLM_ONLY_INDEXED_WHEN_LONG is not None:
+        llm_overrides["LLM_ONLY_INDEXED_WHEN_LONG"] = to_bool(LLM_ONLY_INDEXED_WHEN_LONG)
+    if OLLAMA_TIMEOUT is not None:
+        v = to_int(OLLAMA_TIMEOUT, None)
+        if v is not None:
+            llm_overrides["OLLAMA_TIMEOUT"] = v
+
+    # Run OCR synchronously
+    src_path = settings.UPLOADS_DIR / filename
+    if not src_path.exists():
+        return HTMLResponse(status_code=404, content=f"File not found: {filename}")
+
+    import cv2 as _cv2
+    img = _cv2.imread(str(src_path))
+    if img is None:
+        return HTMLResponse(status_code=500, content="Failed to load image for OCR")
+    ocr = ocr_on_cropped_image(img, debug_basename=f"lab_{Path(filename).stem}", overrides=ocr_overrides or None)
+    lines = ocr.get("lines", []) or []
+    text = ocr.get("text", "") or ""
+
+    # Run LLM with overrides
+    result = extract_fields_from_text(text, lines, overrides=llm_overrides or None)
+
+    # Build overlay with best-guess highlights by matching strings to lines
+    lids = ocr.get("line_ids", []) or []
+    words = ocr.get("words", []) or []
+
+    def find_lid(value: str):
+        if not value:
+            return None
+        v = value.strip().lower()
+        for lid, line in zip(lids, lines):
+            if v and v in str(line).lower():
+                return tuple(lid)
+        return None
+
+    assoc = {
+        "date": find_lid(result.get("date", "")),
+        "payee": find_lid(result.get("payee", "")),
+        "total": find_lid(str(result.get("total", ""))),
+    }
+
+    proc_img = ocr.get("proc_image")
+    overlay_img = None
+    if proc_img is not None:
+        # Filter None values in highlights
+        highlights = {k: v for k, v in assoc.items() if v is not None}
+        overlay_img = draw_overlay_on_image(proc_img, words, [tuple(l) for l in lids], highlights)
+    overlay_url = None
+    if overlay_img is not None:
+        try:
+            out = settings.PROCESSED_DIR / f"overlay_lab_{Path(filename).stem}.jpg"
+            import cv2 as _cv2b
+            _cv2b.imwrite(str(out), overlay_img)
+            overlay_url = f"/data/processed/{out.name}"
+        except Exception:
+            overlay_url = None
+
+    # Prepare context
+    uploads = []
+    try:
+        for p in sorted(settings.UPLOADS_DIR.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file():
+                uploads.append(p.name)
+    except Exception:
+        uploads = []
+
+    ctx = {
+        "request": request,
+        "uploads": uploads,
+        "selected": filename,
+        "defaults": settings,
+        "result": result,
+        "ocr": {"text": text, "lines": lines},
+        "ocr_text": text,
+        "ocr_lines_json": json.dumps(lines),
+        "overlay_url": overlay_url,
+        "ollama": ollama_health(),
+        "overrides": {"ocr": ocr_overrides, "llm": llm_overrides},
+        "image_url": f"/data/uploads/{filename}",
+    }
+    return templates.TemplateResponse("lab.html", ctx)
+
+
+@app.post("/lab/ocr", response_class=HTMLResponse)
+async def lab_ocr(
+    request: Request,
+    filename: str = Form(...),
+    # OCR overrides only
+    OCR_RAW_ONLY: Optional[str] = Form(None),
+    OCR_OEM: Optional[str] = Form(None),
+    OCR_USE_WHITELIST: Optional[str] = Form(None),
+    OCR_CHAR_WHITELIST: Optional[str] = Form(None),
+    OCR_DISABLE_DICTIONARY: Optional[str] = Form(None),
+    OCR_PRESERVE_SPACES: Optional[str] = Form(None),
+    OCR_USER_DPI: Optional[str] = Form(None),
+    OCR_PSMS: Optional[str] = Form(None),
+    OCR_SCORE_LINES_WEIGHT: Optional[str] = Form(None),
+    OCR_USE_THRESH: Optional[str] = Form(None),
+    OCR_ADAPTIVE_BLOCK: Optional[str] = Form(None),
+    OCR_ADAPTIVE_C: Optional[str] = Form(None),
+    OCR_MEDIAN_BLUR: Optional[str] = Form(None),
+    OCR_FORCE_FULLWIDTH_LINES: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MIN_ROW_FRAC: Optional[str] = Form(None),
+    OCR_FULLWIDTH_SMOOTH: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MAX_ROW_FRAC: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MERGE_GAP: Optional[str] = Form(None),
+    OCR_FULLWIDTH_MIN_HEIGHT: Optional[str] = Form(None),
+    TESSERACT_LANG: Optional[str] = Form(None),
+    RECEIPT_CONF_THRESHOLD: Optional[str] = Form(None),
+):
+    # Helper converters
+    def to_bool(val: Optional[str]) -> bool:
+        if val is None:
+            return False
+        return str(val).lower() in ("1", "true", "on", "yes")
+    def to_int(val: Optional[str], default: Optional[int] = None) -> Optional[int]:
+        try:
+            return int(str(val)) if val is not None and str(val).strip() != "" else default
+        except Exception:
+            return default
+    def to_float(val: Optional[str], default: Optional[float] = None) -> Optional[float]:
+        try:
+            return float(str(val)) if val is not None and str(val).strip() != "" else default
+        except Exception:
+            return default
+
+    # Build OCR overrides
+    ocr_overrides: Dict[str, object] = {}
+    if OCR_RAW_ONLY is not None:
+        ocr_overrides["OCR_RAW_ONLY"] = to_bool(OCR_RAW_ONLY)
+    if OCR_OEM is not None:
+        ocr_overrides["OCR_OEM"] = to_int(OCR_OEM, settings.OCR_OEM)
+    if OCR_USE_WHITELIST is not None:
+        ocr_overrides["OCR_USE_WHITELIST"] = to_bool(OCR_USE_WHITELIST)
+    if OCR_CHAR_WHITELIST is not None:
+        ocr_overrides["OCR_CHAR_WHITELIST"] = str(OCR_CHAR_WHITELIST)
+    if OCR_DISABLE_DICTIONARY is not None:
+        ocr_overrides["OCR_DISABLE_DICTIONARY"] = to_bool(OCR_DISABLE_DICTIONARY)
+    if OCR_PRESERVE_SPACES is not None:
+        ocr_overrides["OCR_PRESERVE_SPACES"] = to_bool(OCR_PRESERVE_SPACES)
+    if OCR_USER_DPI is not None:
+        v = to_int(OCR_USER_DPI, settings.OCR_USER_DPI)
+        if v is not None:
+            ocr_overrides["OCR_USER_DPI"] = v
+    if OCR_PSMS is not None:
+        try:
+            arr = [int(x.strip()) for x in str(OCR_PSMS).split(',') if x.strip().isdigit()]
+            if arr:
+                ocr_overrides["OCR_PSMS"] = ",".join(str(x) for x in arr)
+        except Exception:
+            pass
+    if OCR_SCORE_LINES_WEIGHT is not None:
+        v = to_float(OCR_SCORE_LINES_WEIGHT, settings.OCR_SCORE_LINES_WEIGHT)
+        if v is not None:
+            ocr_overrides["OCR_SCORE_LINES_WEIGHT"] = v
+    if OCR_USE_THRESH is not None:
+        ocr_overrides["OCR_USE_THRESH"] = to_bool(OCR_USE_THRESH)
+    if OCR_ADAPTIVE_BLOCK is not None:
+        v = to_int(OCR_ADAPTIVE_BLOCK, settings.OCR_ADAPTIVE_BLOCK)
+        if v is not None:
+            ocr_overrides["OCR_ADAPTIVE_BLOCK"] = v
+    if OCR_ADAPTIVE_C is not None:
+        v = to_int(OCR_ADAPTIVE_C, settings.OCR_ADAPTIVE_C)
+        if v is not None:
+            ocr_overrides["OCR_ADAPTIVE_C"] = v
+    if OCR_MEDIAN_BLUR is not None:
+        v = to_int(OCR_MEDIAN_BLUR, settings.OCR_MEDIAN_BLUR)
+        if v is not None:
+            ocr_overrides["OCR_MEDIAN_BLUR"] = v
+    # Full-width line mode
+    if OCR_FORCE_FULLWIDTH_LINES is not None:
+        ocr_overrides["OCR_FORCE_FULLWIDTH_LINES"] = to_bool(OCR_FORCE_FULLWIDTH_LINES)
+    if OCR_FULLWIDTH_MIN_ROW_FRAC is not None:
+        v = to_float(OCR_FULLWIDTH_MIN_ROW_FRAC, settings.OCR_FULLWIDTH_MIN_ROW_FRAC)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MIN_ROW_FRAC"] = v
+    if OCR_FULLWIDTH_SMOOTH is not None:
+        v = to_int(OCR_FULLWIDTH_SMOOTH, settings.OCR_FULLWIDTH_SMOOTH)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_SMOOTH"] = v
+    if OCR_FULLWIDTH_MAX_ROW_FRAC is not None:
+        v = to_float(OCR_FULLWIDTH_MAX_ROW_FRAC, settings.OCR_FULLWIDTH_MAX_ROW_FRAC)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MAX_ROW_FRAC"] = v
+    if OCR_FULLWIDTH_MERGE_GAP is not None:
+        v = to_int(OCR_FULLWIDTH_MERGE_GAP, settings.OCR_FULLWIDTH_MERGE_GAP)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MERGE_GAP"] = v
+    if OCR_FULLWIDTH_MIN_HEIGHT is not None:
+        v = to_int(OCR_FULLWIDTH_MIN_HEIGHT, settings.OCR_FULLWIDTH_MIN_HEIGHT)
+        if v is not None:
+            ocr_overrides["OCR_FULLWIDTH_MIN_HEIGHT"] = v
+    if TESSERACT_LANG is not None and TESSERACT_LANG.strip():
+        ocr_overrides["TESSERACT_LANG"] = TESSERACT_LANG.strip()
+    if RECEIPT_CONF_THRESHOLD is not None:
+        v = to_int(RECEIPT_CONF_THRESHOLD, settings.RECEIPT_CONF_THRESHOLD)
+        if v is not None:
+            ocr_overrides["RECEIPT_CONF_THRESHOLD"] = v
+
+    # Run OCR
+    src_path = settings.UPLOADS_DIR / filename
+    if not src_path.exists():
+        return HTMLResponse(status_code=404, content=f"File not found: {filename}")
+    import cv2 as _cv2
+    img = _cv2.imread(str(src_path))
+    if img is None:
+        return HTMLResponse(status_code=500, content="Failed to load image for OCR")
+    ocr = ocr_on_cropped_image(img, debug_basename=f"lab_{Path(filename).stem}", overrides=ocr_overrides or None)
+    lines = ocr.get("lines", []) or []
+    text = ocr.get("text", "") or ""
+
+    # Draw overlay
+    lids = ocr.get("line_ids", []) or []
+    words = ocr.get("words", []) or []
+    assoc: Dict[str, Optional[tuple]] = {}
+    proc_img = ocr.get("proc_image")
+    overlay_url = None
+    if proc_img is not None:
+        try:
+            overlay_img = draw_overlay_on_image(proc_img, words, [tuple(l) for l in lids], {})
+            out = settings.PROCESSED_DIR / f"overlay_lab_{Path(filename).stem}.jpg"
+            _cv2.imwrite(str(out), overlay_img)
+            overlay_url = f"/data/processed/{out.name}"
+        except Exception:
+            overlay_url = None
+
+    # Prepare uploads list
+    uploads = []
+    try:
+        for p in sorted(settings.UPLOADS_DIR.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file():
+                uploads.append(p.name)
+    except Exception:
+        uploads = []
+
+    ctx = {
+        "request": request,
+        "uploads": uploads,
+        "selected": filename,
+        "defaults": settings,
+        "result": None,
+        "ocr": {"text": text, "lines": lines},
+        "ocr_text": text,
+        "ocr_lines_json": json.dumps(lines),
+        "overlay_url": overlay_url,
+        "ollama": ollama_health(),
+        "overrides": {"ocr": ocr_overrides, "llm": {}},
+        "image_url": f"/data/uploads/{filename}",
+    }
+    return templates.TemplateResponse("lab.html", ctx)
+
+
+@app.post("/lab/llm", response_class=HTMLResponse)
+async def lab_llm(
+    request: Request,
+    filename: str = Form(...),
+    # LLM overrides only
+    OLLAMA_MODEL: Optional[str] = Form(None),
+    LLM_MAX_LINES: Optional[str] = Form(None),
+    LLM_MAX_CHARS: Optional[str] = Form(None),
+    LLM_INCLUDE_FULL_TEXT: Optional[str] = Form(None),
+    LLM_ONLY_INDEXED_WHEN_LONG: Optional[str] = Form(None),
+    OLLAMA_TIMEOUT: Optional[str] = Form(None),
+    # OCR artifacts passed through hidden fields
+    ocr_text: Optional[str] = Form(None),
+    ocr_lines_json: Optional[str] = Form(None),
+):
+    # Convert helpers
+    def to_bool(val: Optional[str]) -> bool:
+        if val is None:
+            return False
+        return str(val).lower() in ("1", "true", "on", "yes")
+    def to_int(val: Optional[str], default: Optional[int] = None) -> Optional[int]:
+        try:
+            return int(str(val)) if val is not None and str(val).strip() != "" else default
+        except Exception:
+            return default
+
+    llm_overrides: Dict[str, object] = {}
+    if OLLAMA_MODEL is not None and OLLAMA_MODEL.strip():
+        llm_overrides["OLLAMA_MODEL"] = OLLAMA_MODEL.strip()
+    if LLM_MAX_LINES is not None:
+        v = to_int(LLM_MAX_LINES, None)
+        if v is not None:
+            llm_overrides["LLM_MAX_LINES"] = v
+    if LLM_MAX_CHARS is not None:
+        v = to_int(LLM_MAX_CHARS, None)
+        if v is not None:
+            llm_overrides["LLM_MAX_CHARS"] = v
+    if LLM_INCLUDE_FULL_TEXT is not None:
+        llm_overrides["LLM_INCLUDE_FULL_TEXT"] = to_bool(LLM_INCLUDE_FULL_TEXT)
+    if LLM_ONLY_INDEXED_WHEN_LONG is not None:
+        llm_overrides["LLM_ONLY_INDEXED_WHEN_LONG"] = to_bool(LLM_ONLY_INDEXED_WHEN_LONG)
+    if OLLAMA_TIMEOUT is not None:
+        v = to_int(OLLAMA_TIMEOUT, None)
+        if v is not None:
+            llm_overrides["OLLAMA_TIMEOUT"] = v
+
+    # Parse OCR artifacts from hidden fields
+    lines: List[str] = []
+    text: str = ocr_text or ""
+    if ocr_lines_json:
+        try:
+            data = json.loads(ocr_lines_json)
+            if isinstance(data, list):
+                lines = [str(x) for x in data]
+        except Exception:
+            lines = []
+
+    # If no OCR provided, run a minimal OCR to get text and lines for LLM
+    if not text or not lines:
+        src_path = settings.UPLOADS_DIR / filename
+        if not src_path.exists():
+            return HTMLResponse(status_code=404, content=f"File not found: {filename}")
+        import cv2 as _cv2
+        img = _cv2.imread(str(src_path))
+        if img is None:
+            return HTMLResponse(status_code=500, content="Failed to load image for OCR")
+        ocr = ocr_on_cropped_image(img, debug_basename=None, overrides=None)
+        lines = ocr.get("lines", []) or []
+        text = ocr.get("text", "") or ""
+
+    # Run LLM
+    result = extract_fields_from_text(text, lines, overrides=llm_overrides or None)
+
+    # Prepare uploads list
+    uploads = []
+    try:
+        for p in sorted(settings.UPLOADS_DIR.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.is_file():
+                uploads.append(p.name)
+    except Exception:
+        uploads = []
+
+    ctx = {
+        "request": request,
+        "uploads": uploads,
+        "selected": filename,
+        "defaults": settings,
+        "result": result,
+        "ocr": {"text": text, "lines": lines},
+        "ocr_text": text,
+        "ocr_lines_json": json.dumps(lines),
+        "overlay_url": None,  # overlay comes from prior OCR run if any
+        "ollama": ollama_health(),
+        "overrides": {"ocr": {}, "llm": llm_overrides},
+        "image_url": f"/data/uploads/{filename}",
+    }
+    return templates.TemplateResponse("lab.html", ctx)
 
 
 @app.get("/docs/flow", response_class=HTMLResponse)

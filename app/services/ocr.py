@@ -1,7 +1,6 @@
 from typing import Dict, Any, List, Optional
 from PIL import Image
 import pytesseract
-import importlib
 import numpy as np
 
 from app.config import settings
@@ -15,19 +14,15 @@ if settings.DEBUG:
 else:
     logger.setLevel(logging.INFO)
 
-# Optional dependency import for OpenCV with clear error message
-cv2: Any  # typing hint for static analyzers
+# OpenCV is required for preprocessing and overlays
 try:
-    cv2 = importlib.import_module("cv2")
-except Exception as e:  # pragma: no cover - import resolution at runtime
-    cv2 = None  # type: ignore[assignment]
-    logger.debug("cv2 import failed at import time: %s", e)
+    import cv2  # type: ignore
+except ImportError as e:  # pragma: no cover - import resolution at runtime
+    raise ImportError("OpenCV (cv2) is required for OCR and overlays. Install with 'pip install opencv-python-headless'.") from e
 
 
 """
-MVP simplification: We removed automatic cropping/warping logic from this module.
-Use app.services.image_preproc utilities in other modules if needed; this module
-focuses on robust OCR from an already-provided image array.
+This module focuses on robust OCR from an already-provided image array.
 """
 
 # Light, coordinate-stable preprocessing for OCR: BGR->grayscale + optional CLAHE; no resize/thresh.
@@ -38,7 +33,6 @@ def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
     - Avoid hard thresholding or resizing to keep coordinates stable
     Returns a single-channel uint8 image.
     """
-    assert cv2 is not None, "cv2 is required"
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     try:
         clahe = cv2.createCLAHE(clipLimit=float(settings.OCR_CLAHE_CLIP), tileGridSize=(8, 8))
@@ -56,7 +50,6 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     best result by word count. Also returns the processed image used, so
     overlays align perfectly.
     """
-    assert cv2 is not None, "cv2 is required"
 
     # Resolve configuration values with optional per-call overrides
     def cfg(name: str, default: Any = None) -> Any:
@@ -329,7 +322,15 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
 
     def run_ocr(img_single: np.ndarray, psm: int) -> Dict[str, Any]:
         pil_img = Image.fromarray(img_single)
-        config = f"--oem 1 --psm {psm} -c tessedit_char_whitelist={OCR_CHAR_WHITELIST}"
+        # Build config honoring lab/settings controls
+        oem = OCR_OEM
+        whitelist = OCR_CHAR_WHITELIST if OCR_USE_WHITELIST else ""
+        dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+        spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+        dpi_flag = f"--dpi {OCR_USER_DPI}"
+        config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag}"
+        if whitelist:
+            config += f" -c tessedit_char_whitelist={whitelist}"
         data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
         words: List[Dict[str, Any]] = []
         lines_map: Dict[tuple, List[int]] = {}
@@ -412,8 +413,6 @@ def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], lin
     base_img can be grayscale or BGR; output is BGR. Coordinates must
     match the provided words (i.e., same image used for OCR).
     """
-    if cv2 is None:
-        raise RuntimeError("OpenCV (cv2) is required for drawing overlays but is not installed.")
     # Ensure color canvas
     if len(base_img.shape) == 2:
         canvas = cv2.cvtColor(base_img, cv2.COLOR_GRAY2BGR)

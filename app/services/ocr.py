@@ -25,6 +25,73 @@ except ImportError as e:  # pragma: no cover - import resolution at runtime
 This module focuses on robust OCR from an already-provided image array.
 """
 
+# Helper: cluster words into visual lines by Y position and sort lines top-to-bottom, then words left-to-right.
+def _cluster_lines_by_y(words: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Given a flat list of word dicts with coords, build line clusters by Y.
+
+    Returns a dict with keys:
+    - lines: list[str] concatenated text per line
+    - line_ids: list[tuple] identifiers (1,1,i)
+    - words: updated words with 'line_id' rewritten to cluster IDs
+    """
+    if not words:
+        return {"lines": [], "line_ids": [], "words": []}
+
+    # Compute median height and per-word vertical centers
+    heights = [max(1, int(w.get("height", 0) or 0)) for w in words if isinstance(w.get("height"), (int, float))]
+    med_h = float(np.median(heights)) if heights else 12.0
+    # Tolerances from settings
+    try:
+        frac = float(getattr(settings, "OCR_Y_CLUSTER_TOL_FRAC", 0.6))
+    except Exception:
+        frac = 0.6
+    try:
+        min_px = int(getattr(settings, "OCR_Y_CLUSTER_MIN_PX", 6))
+    except Exception:
+        min_px = 6
+    y_tol = max(float(min_px), med_h * float(frac))
+
+    # Prepare sortable list with index for stable updates
+    idxs = list(range(len(words)))
+    y_mids = [float(w["top"]) + float(w["height"]) / 2.0 for w in words]
+    # Sort by y center primarily, then x (left)
+    idxs.sort(key=lambda i: (y_mids[i], float(words[i]["left"])) )
+
+    clusters: List[List[int]] = []  # lists of word indices
+    cluster_ys: List[float] = []    # running mean y per cluster
+    for i in idxs:
+        y = y_mids[i]
+        if not clusters:
+            clusters.append([i])
+            cluster_ys.append(y)
+            continue
+        # Compare to last cluster center
+        if abs(y - cluster_ys[-1]) <= y_tol:
+            clusters[-1].append(i)
+            # update running mean for stability
+            cluster_ys[-1] = (cluster_ys[-1] * (len(clusters[-1]) - 1) + y) / float(len(clusters[-1]))
+        else:
+            clusters.append([i])
+            cluster_ys.append(y)
+
+    # Build outputs: within each cluster, sort by x (left), then join
+    new_words = words  # in-place update of line_id
+    lines: List[str] = []
+    lids: List[tuple] = []
+    for li, inds in enumerate(clusters, start=1):
+        inds_sorted = sorted(inds, key=lambda k: float(new_words[k]["left"]))
+        lid = (1, 1, int(li))
+        tokens: List[str] = []
+        for k in inds_sorted:
+            new_words[k]["line_id"] = lid
+            tok = str(new_words[k].get("text", "")).strip()
+            if tok:
+                tokens.append(tok)
+        lines.append(" ".join(tokens))
+        lids.append(lid)
+
+    return {"lines": lines, "line_ids": lids, "words": new_words}
+
 # Light, coordinate-stable preprocessing for OCR: BGR->grayscale + optional CLAHE; no resize/thresh.
 def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
     """Light preprocessing intended not to destroy content.
@@ -103,8 +170,6 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             pil_img = Image.fromarray(img_variant)
             data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
             words: List[Dict[str, Any]] = []
-            lines_map: Dict[tuple, List[int]] = {}
-            all_lines_text: Dict[tuple, List[str]] = {}
             n = len(data.get('text', []))
             for i in range(n):
                 txt = (data['text'][i] or '').strip()
@@ -117,13 +182,11 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
                 if conf < RECEIPT_CONF_THRESHOLD:
                     continue
                 left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-                block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
-                lid = (block, par, line)
-                words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': lid})
-                lines_map.setdefault(lid, []).append(len(words) - 1)
-                all_lines_text.setdefault(lid, []).append(txt)
-            ordered_lids = sorted(lines_map.keys())
-            lines: List[str] = [" ".join(all_lines_text[lid]) for lid in ordered_lids]
+                # Temporarily assign source lid; will be overwritten by y-cluster
+                words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': (int(data['block_num'][i]), int(data['par_num'][i]), int(data['line_num'][i]))})
+            grouped = _cluster_lines_by_y(words)
+            lines: List[str] = grouped['lines']
+            lids: List[tuple] = grouped['line_ids']
             text = "\n".join(lines)
             # Preserve the variant’s size for coordinates
             if img_variant.ndim == 2:
@@ -133,8 +196,8 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             return {
                 'text': text,
                 'lines': lines,
-                'words': words,
-                'line_ids': ordered_lids,
+                'words': grouped['words'],
+                'line_ids': lids,
                 'size': (w, h),
                 'proc_image': img_variant if img_variant.ndim == 3 else cv2.cvtColor(img_variant, cv2.COLOR_GRAY2BGR),
             }
@@ -333,8 +396,6 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             config += f" -c tessedit_char_whitelist={whitelist}"
         data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=config)
         words: List[Dict[str, Any]] = []
-        lines_map: Dict[tuple, List[int]] = {}
-        all_lines_text: Dict[tuple, List[str]] = {}
         n = len(data.get('text', []))
         for i in range(n):
             txt = (data['text'][i] or '').strip()
@@ -347,27 +408,25 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             if conf < RECEIPT_CONF_THRESHOLD:
                 continue
             left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-            block, par, line = data['block_num'][i], data['par_num'][i], data['line_num'][i]
-            lid = (block, par, line)
+            # Temporarily assign source lid; will be overwritten by y-cluster
             words.append({
                 'text': txt,
                 'left': int(left),
                 'top': int(top),
                 'width': int(width),
                 'height': int(height),
-                'line_id': lid,
+                'line_id': (int(data['block_num'][i]), int(data['par_num'][i]), int(data['line_num'][i])),
             })
-            lines_map.setdefault(lid, []).append(len(words) - 1)
-            all_lines_text.setdefault(lid, []).append(txt)
-        ordered_lids = sorted(lines_map.keys())
-        lines: List[str] = [" ".join(all_lines_text[lid]) for lid in ordered_lids]
+        grouped = _cluster_lines_by_y(words)
+        lines: List[str] = grouped['lines']
         text = "\n".join(lines)
+        lids: List[tuple] = grouped['line_ids']
         h, w = img_single.shape
         return {
             'text': text,
             'lines': lines,
-            'words': words,
-            'line_ids': ordered_lids,
+            'words': grouped['words'],
+            'line_ids': lids,
             'size': (w, h),
         }
 

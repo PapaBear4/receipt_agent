@@ -111,7 +111,7 @@ class Settings:
     OCR_RAW_ONLY: bool = os.getenv("OCR_RAW_ONLY", "true").lower() in {"1", "true", "yes"}
     # OCR engine/options
     # Comma-separated PSMs to try in order; we pick the result with the most words
-    OCR_PSMS: str = os.getenv("OCR_PSMS", "11,6,4,3,7")
+    OCR_PSMS: str = os.getenv("OCR_PSMS", "4,6,3,7")
     # OCR engine mode: 1=LSTM only, 3=default; try 3 if results are too sparse
     OCR_OEM: int = int(os.getenv("OCR_OEM", "3"))
     # Whitelist handling: if false or empty, no whitelist constraint is passed
@@ -125,16 +125,16 @@ class Settings:
     # Preserve spaces: improves layout fidelity in outputs
     OCR_PRESERVE_SPACES: bool = os.getenv("OCR_PRESERVE_SPACES", "true").lower() in {"1", "true", "yes"}
     # DPI hint for Tesseract; camera images benefit from a higher user-defined DPI
-    OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "350"))
+    OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "100"))
     # Selection scoring weight: favor OCR variants that yield more distinct lines
     # Score = words + (OCR_SCORE_LINES_WEIGHT * lines). Increase to penalize merged lines.
-    OCR_SCORE_LINES_WEIGHT: float = float(os.getenv("OCR_SCORE_LINES_WEIGHT", "0.5"))
+    OCR_SCORE_LINES_WEIGHT: float = float(os.getenv("OCR_SCORE_LINES_WEIGHT", "0.8"))
 
     # Experimental: force OCR to operate on horizontal, full-width bands from top to bottom
     # When enabled, we segment the image into horizontal strips spanning the entire width,
     # then run Tesseract on each strip as a single line (PSM 7). Useful when default page
     # segmentation merges columns or skips narrow lines.
-    OCR_FORCE_FULLWIDTH_LINES: bool = os.getenv("OCR_FORCE_FULLWIDTH_LINES", "false").lower() in {"1", "true", "yes"}
+    OCR_FORCE_FULLWIDTH_LINES: bool = os.getenv("OCR_FORCE_FULLWIDTH_LINES", "true").lower() in {"1", "true", "yes"}
     # Minimum number of "ink" pixels per row, as a fraction of image width, to consider it part of a line
     OCR_FULLWIDTH_MIN_ROW_FRAC: float = float(os.getenv("OCR_FULLWIDTH_MIN_ROW_FRAC", "0.012"))
     # Optional: rows above this ink fraction are ignored (helps skip barcode stripes)
@@ -143,9 +143,15 @@ class Settings:
     # Default 9; override with OCR_FULLWIDTH_SMOOTH if provided
     OCR_FULLWIDTH_SMOOTH: int = int(os.getenv("OCR_FULLWIDTH_SMOOTH", "9"))
     # Merge short gaps (rows) between bands to prevent over-segmentation
-    OCR_FULLWIDTH_MERGE_GAP: int = int(os.getenv("OCR_FULLWIDTH_MERGE_GAP", "3"))
+    OCR_FULLWIDTH_MERGE_GAP: int = int(os.getenv("OCR_FULLWIDTH_MERGE_GAP", "1"))
     # Minimum band height (rows) to keep
-    OCR_FULLWIDTH_MIN_HEIGHT: int = int(os.getenv("OCR_FULLWIDTH_MIN_HEIGHT", "12"))
+    OCR_FULLWIDTH_MIN_HEIGHT: int = int(os.getenv("OCR_FULLWIDTH_MIN_HEIGHT", "8"))
+
+    # Post-OCR line clustering and ordering (env overridable)
+    # Merge words into visual lines by Y and sort lines top-to-bottom, then words left-to-right.
+    # y tolerance = max(OCR_Y_CLUSTER_MIN_PX, median_word_height * OCR_Y_CLUSTER_TOL_FRAC)
+    OCR_Y_CLUSTER_TOL_FRAC: float = float(os.getenv("OCR_Y_CLUSTER_TOL_FRAC", "0.60"))
+    OCR_Y_CLUSTER_MIN_PX: int = int(os.getenv("OCR_Y_CLUSTER_MIN_PX", "6"))
 
 
 settings = Settings()

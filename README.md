@@ -18,6 +18,33 @@ Minimal FastAPI app to OCR receipt images, extract fields with a local LLM (Olla
   - `ynab.py` (raw YNAB API client) and `ynab_service.py` (route-facing logic for settings/meta/push)
 - Templates and static assets under `app/templates/` and `app/static/`
 
+## OCR pipeline (summary)
+The OCR path produces stable, line-ordered text and coordinates for overlays and the LLM:
+
+- Preprocess
+  - Convert to grayscale and apply gentle CLAHE (local contrast) to avoid destroying coordinates.
+  - Optionally try an adaptive-threshold variant with small opening and median blur to reduce speckle.
+  - Upscale if the image’s longest side is small (keeps coordinates proportional).
+- Run Tesseract across variants and PSMs
+  - PSMs are configurable (e.g., 6, 4, 11, 7, 3). RAW_ONLY can bypass preprocessing and run rgb/gray/invert directly.
+  - Full‑width line mode (optional): segment horizontal bands by projection and OCR each as a single line (PSM 7).
+- Parse words and filter
+  - Keep words above a confidence threshold; collect boxes and raw line hints.
+- Y‑cluster post‑process
+  - Sort words by vertical center, cluster into visual lines using a tolerance derived from median word height.
+  - Within each line cluster, sort words left‑to‑right and assign stable `line_id = (1, 1, i)`.
+  - Output `lines` (top‑to‑bottom), `words` with boxes and `line_id`, `line_ids`, `text` (joined lines), and `size`.
+- Select best variant
+  - Score = `word_count + (OCR_SCORE_LINES_WEIGHT * line_count)`; pick the highest. Return the exact `proc_image` used so overlays align pixel‑perfect.
+
+Key knobs (env)
+- `RECEIPT_CONF_THRESHOLD`, `OCR_PSMS`, `OCR_OEM`, `OCR_USE_WHITELIST`, `OCR_PRESERVE_SPACES`, `OCR_DISABLE_DICTIONARY`, `OCR_USER_DPI`
+- `OCR_USE_THRESH`, `OCR_ADAPTIVE_BLOCK`, `OCR_ADAPTIVE_C`, `OCR_MEDIAN_BLUR`
+- `OCR_SCORE_LINES_WEIGHT` (bias selection toward cleaner line separation)
+- `OCR_RAW_ONLY` (bypass preprocessing)
+- Full‑width mode: `OCR_FORCE_FULLWIDTH_LINES` + `OCR_FULLWIDTH_*` knobs for band detection/merging
+- Y‑cluster: `OCR_Y_CLUSTER_TOL_FRAC`, `OCR_Y_CLUSTER_MIN_PX` to control vertical grouping tolerance
+
 ## Requirements
 - Python 3.10+ (tested on 3.12)
 - System packages:

@@ -76,25 +76,35 @@ flowchart TD
 
     <div class="card">
       <h2>OCR Pipeline (internals)</h2>
-      <div class="mermaid">
+  <div class="mermaid">
  flowchart TD
-  A[Input image] --> B[Light preprocess gray CLAHE]
-  B --> C[Upscale if small]
-  C --> D[Variant gray]
-  C --> E[Variant threshold open blur]
-  D --> F[run ocr PSM 6 4 11 7 3]
-  E --> G[run ocr PSM 6 4 11 7 3]
-  F --> T[Parse filter group lines]
-  G --> T
-  T --> H[Pick best by word count]
-  H --> I[Best result fields]
-  I --> O1[Write ocr json]
-  I --> O2[Provide text to llm]
-  I --> J[Draw overlay]
-  J --> O3[Write overlay image]
-  A --> K[Raw variants rgb gray invert]
-  K --> L[run raw with PSM list]
-  L --> T
+  A[Input image] --> P1[Light preprocess: gray + CLAHE]
+  P1 --> P2[Upscale if small]
+  P2 --> V1[Variant: gray]
+  P2 --> V2[Variant: adaptive thresh + open + median blur]
+  V1 --> R1[Run Tesseract PSM list]
+  V2 --> R2[Run Tesseract PSM list]
+  R1 --> Y1[Parse words + conf filter]
+  R2 --> Y2[Parse words + conf filter]
+  Y1 --> C1[Y-cluster: sort by Y, group lines, sort X]
+  Y2 --> C2[Y-cluster: sort by Y, group lines, sort X]
+  C1 --> S[Score variant: words + w*lines]
+  C2 --> S
+  S --> B[Select best variant]
+  B --> O[Outputs: text, lines, words+boxes, line_ids, size, proc_image]
+  O --> J[Draw overlay]
+  O --> O1[Write ocr_*.json]
+  J --> O2[Write overlay_*.jpg]
+  A --> RW[RAW mode: rgb/gray/invert]
+  RW --> RR[Run raw PSM list]
+  RR --> RY[Parse + conf filter]
+  RY --> RC[Y-cluster]
+  RC --> S
+  A --> FW[Full-width bands mode]
+  FW --> FB[Segment horizontal bands]
+  FB --> FR[PSM 7 per band]
+  FR --> FO[Words/lines with band line_ids]
+  FO --> O
   </div>
       <div class="muted" style="font-size:0.9rem; margin-top:0.25rem;">
         Steps: preprocess and upscale, try two variants, run several PSM modes, parse and filter by confidence, pick the best by word count, draw overlay. Raw mode sends rgb/gray/invert directly to the same selection.

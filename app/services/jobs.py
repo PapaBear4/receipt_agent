@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Job:
+    # In-memory representation of a receipt processing job and its status.
     id: str
     stored_name: str
     original_name: str
@@ -33,31 +34,37 @@ class Job:
 
 
 class JobManager:
+    # Simple threaded job queue/runner for processing receipts one by one.
     def __init__(self) -> None:
         self._q: queue.Queue[Job] = queue.Queue()
         self._jobs: Dict[str, Job] = {}
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
 
+    # Start the background worker thread if not running.
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._thread = threading.Thread(target=self._worker, name="receipt-worker", daemon=True)
         self._thread.start()
 
+    # Add a job to the queue and track it by id.
     def enqueue(self, job: Job) -> None:
         with self._lock:
             self._jobs[job.id] = job
         self._q.put(job)
 
+    # Retrieve a job by id.
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
             return self._jobs.get(job_id)
 
+    # Return a snapshot of all tracked jobs.
     def all(self) -> Dict[str, Job]:
         with self._lock:
             return dict(self._jobs)
 
+    # True if any job is queued or processing.
     def any_busy(self) -> bool:
         with self._lock:
             for j in self._jobs.values():
@@ -67,9 +74,11 @@ class JobManager:
 
     def clear_jobs(self) -> None:
         """Clear tracked job records (does not cancel running tasks)."""
+        # Forget local job state; does not affect the background thread.
         with self._lock:
             self._jobs.clear()
 
+    # Background loop: take jobs from queue and process with error handling.
     def _worker(self) -> None:
         while True:
             job = self._q.get()
@@ -89,6 +98,7 @@ class JobManager:
             finally:
                 self._q.task_done()
 
+    # Core pipeline: load image -> OCR -> LLM extract -> save overlay + JSON artifacts.
     def _process(self, job: Job) -> None:
         stored_path = settings.UPLOADS_DIR / job.stored_name
         if not stored_path.exists():

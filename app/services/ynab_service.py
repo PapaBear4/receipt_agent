@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
 
 
+# Load persisted user config (selected budget id, etc.) from data dir.
 def _load_user_conf() -> dict:
     try:
         if USER_CONF_PATH.exists():
@@ -23,6 +24,7 @@ def _load_user_conf() -> dict:
     return {}
 
 
+# Persist user config JSON to data dir.
 def _save_user_conf(d: dict) -> None:
     try:
         USER_CONF_PATH.write_text(json.dumps(d, indent=2))
@@ -30,6 +32,7 @@ def _save_user_conf(d: dict) -> None:
         pass
 
 
+# Build template context for YNAB settings page (budgets/accounts/categories/payees/errors).
 def get_settings_context(request: Request) -> Dict[str, Any]:
     """Build context for the YNAB settings page by calling YNAB APIs.
     Returns only the template context; the route will render.
@@ -100,6 +103,7 @@ def get_settings_context(request: Request) -> Dict[str, Any]:
     }
 
 
+# Build template context for YNAB metadata page (budgets/accounts/categories) with error fields.
 def get_meta_context(request: Request) -> Dict[str, Any]:
     """Build context for the YNAB metadata page by calling YNAB APIs."""
     client = YNABClient()
@@ -163,12 +167,14 @@ def get_meta_context(request: Request) -> Dict[str, Any]:
     }
 
 
+# Save the user's selected YNAB budget id for later API calls.
 def set_selected_budget_id(budget_id: str) -> None:
     conf = _load_user_conf()
     conf["ynab_budget_id"] = (budget_id or "").strip()
     _save_user_conf(conf)
 
 
+# Push a single transaction to YNAB using current settings; returns result or error.
 def push_transaction(
     *,
     stored_filename: str,

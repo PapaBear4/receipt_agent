@@ -1,18 +1,20 @@
 import json
 import time
 import requests
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 import logging
+from pathlib import Path
 
 from app.config import settings
 
-from typing import Any
+from pydantic import BaseModel, Field, ValidationError
 
 # Two-pass prompts
 META_PROMPT = (
-    """
-You are a receipt extraction assistant. Extract only HEADER fields and do not list items.
-Return ONLY valid JSON in this exact shape:
+        """
+System: You are a precise receipt metadata expert. You extract ONLY header fields (no items).
+
+Return ONLY valid JSON matching exactly:
 {
     "date": "",
     "payee": "",
@@ -27,20 +29,89 @@ Return ONLY valid JSON in this exact shape:
         "last4": ""
     }
 }
-Guidance:
+
+Rules:
 - Identify merchant/store name (payee).
 - Parse purchase date (prefer MM/DD/YYYY; best-effort otherwise).
 - Determine final total charged; fill payment breakouts if present.
-- Payment method and last 4 digits of the card when available.
-Input format notes:
-- You will receive OCR LINES (indexed) below.
-- OCR LINES are shown as "i: <text>" where i starts at 0 and increases in reading order (top-to-bottom, left-to-right).
-- When referencing a specific line from OCR LINES, use its index number; do not invent indices that are not shown.
-Return only JSON.
+- Infer payment method and card last4 if present.
+
+Input format:
+- OCR LINES are provided below as "i: <text>" in reading order; only use indices that exist.
+Output: JSON only.
 """
 )
 
+ITEMS_PROMPT_PREAMBLE = (
+        """
+System: You are a receipt line-items expert. Extract purchasable items only.
 
+Context hints (from previous step):
+- PAYEE: {payee}
+- DATE: {date}
+- TOTAL_HINT: {total}
+- PAYMENT: method={method} last4={last4}
+
+Input format:
+- OCR LINES are provided below as 'i: <text>' in reading order; only use existing indices.
+- If an item spans multiple adjacent lines, use the first line index and set ocr_text to the best combined text.
+
+Return ONLY valid JSON in this exact shape:
+{{
+    "items": [
+        {{"line_index": -1, "ocr_text": "", "name": "", "qty": 0.0, "unit_price": 0.0, "amount": 0.0, "confidence": 0.0}}
+    ]
+}}
+
+Rules for items:
+- Map each item to the appropriate line_index; combine adjacent lines when needed.
+- Handle multi-quantity patterns (e.g., "x3", "3 @ 0.99", "3 for 2.99").
+- Ignore headers and summary lines (SUBTOTAL, TAX, TOTAL, payments, card info).
+- Provide confidence 0.0–1.0 per item.
+"""
+)
+
+# ---- Models ----
+
+class Payment(BaseModel):
+        subtotal: float = 0.0
+        tax: float = 0.0
+        tip: float = 0.0
+        discounts: float = 0.0
+        fees: float = 0.0
+        method: str = ""
+        last4: str = ""
+
+
+class Meta(BaseModel):
+        date: str = ""
+        payee: str = ""
+        total: float = 0.0
+        payment: Payment = Field(default_factory=Payment)
+
+
+class Item(BaseModel):
+        line_index: int = -1
+        ocr_text: str = ""
+        name: str = ""
+        qty: float = 0.0
+        unit_price: float = 0.0
+        amount: float = 0.0
+        confidence: float = 0.0
+
+
+class PipelineContext(BaseModel):
+    raw_text: str = ""
+    ocr_lines: List[str] = Field(default_factory=list)
+    meta: Meta = Field(default_factory=Meta)
+    items: List[Item] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    debug: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ---- HTTP helpers ----
+
+# HTTP POST wrapper with a single quick retry on connection errors.
 def _http_post(url: str, payload: dict, timeout: int) -> requests.Response:
     """Wrapper for POST with small retry on connection errors."""
     try:
@@ -50,6 +121,184 @@ def _http_post(url: str, payload: dict, timeout: int) -> requests.Response:
         time.sleep(0.3)
         return requests.post(url, json=payload, timeout=timeout)
 
+# Prompt file loader with fallback to built-in defaults
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+def _read_prompt(filename: str, default_text: str) -> str:
+    try:
+        p = _PROMPTS_DIR / filename
+        if p.exists():
+            return p.read_text()
+    except Exception:
+        pass
+    return default_text
+
+# Extract JSON object from a possibly-noisy text response.
+def _parse_json_object(text: str) -> dict:
+    s = text.find("{")
+    e = text.rfind("}")
+    snippet = text[s:e+1] if (s != -1 and e != -1 and e > s) else text
+    try:
+        return json.loads(snippet)
+    except Exception:
+        return {}
+
+# Basic cleanup of OCR lines to drop noise.
+def _filter_useful_lines(lines: Optional[List[str]]) -> List[str]:
+    def _looks_useful(line: str) -> bool:
+        if not line:
+            return False
+        s = str(line).strip()
+        if len(s) <= 1:
+            return False
+        return any(c.isdigit() for c in s) or any(ch in s for ch in "$€£%") or len(s) >= 4
+
+    return [ln for ln in (lines or []) if _looks_useful(ln)]
+
+
+# ---- LLM client wrapper ----
+
+class LlmClient:
+    def __init__(self, model: str, endpoint: str, timeout: int) -> None:
+        self.model = model
+        self.endpoint = endpoint.rstrip("/")
+        self.timeout = timeout
+
+    def generate_json(self, prompt: str) -> Tuple[str, dict]:
+        url = f"{self.endpoint}/api/generate"
+        t0 = time.perf_counter()
+        resp = _http_post(url, {"model": self.model, "prompt": prompt, "stream": False, "format": "json"}, self.timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        t1 = time.perf_counter()
+        # attach wall clock
+        data.setdefault("_client_wall_sec", max(0.0, t1 - t0))
+        return (str(data.get("response", "") or "").strip(), data)
+
+
+# ---- Experts ----
+
+class BaseExpert:
+    name = "base"
+
+    def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
+        raise NotImplementedError
+
+
+class MetaExpert(BaseExpert):
+    name = "meta"
+
+    def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
+        meta_tmpl = _read_prompt("meta_system.txt", META_PROMPT)
+        prompt = f"{meta_tmpl}\n\n{lines_block}\n"
+        text, data = client.generate_json(prompt)
+        obj = _parse_json_object(text)
+        try:
+            ctx.meta = Meta.model_validate(obj)
+        except ValidationError:
+            # Keep defaults on failure
+            ctx.warnings.append("meta-validate-failed")
+        # Capture debug info including any non-modeled fields like 'sources'
+        try:
+            ctx.debug.setdefault("meta", {})
+            ctx.debug["meta"].update({
+                "prompt_full": prompt,
+                "prompt": meta_tmpl,
+                "response_raw": text,
+                "response_json": obj,
+                "sources": obj.get("sources") if isinstance(obj, dict) else None,
+                "stats": {
+                    "prompt_tokens": data.get("prompt_eval_count"),
+                    "completion_tokens": data.get("eval_count"),
+                },
+            })
+        except Exception:
+            pass
+        return ctx, data
+
+
+class ItemsExpert(BaseExpert):
+    name = "items"
+
+    def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
+        items_tmpl = _read_prompt("items_system.txt", ITEMS_PROMPT_PREAMBLE)
+        pre = items_tmpl.format(
+            payee=ctx.meta.payee,
+            date=ctx.meta.date,
+            total=ctx.meta.total,
+            method=ctx.meta.payment.method,
+            last4=ctx.meta.payment.last4,
+        )
+        prompt = f"{pre}\n\n{lines_block}\n"
+        text, data = client.generate_json(prompt)
+        obj = _parse_json_object(text)
+        raw_items = (obj.get("items") or []) if isinstance(obj, dict) else []
+        items: List[Item] = []
+        if isinstance(raw_items, list):
+            for it in raw_items:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    items.append(Item(
+                        line_index=int(it.get("line_index", -1) or -1),
+                        ocr_text=str(it.get("ocr_text", "") or ""),
+                        name=str(it.get("name", "") or ""),
+                        qty=float(it.get("qty", 0.0) or 0.0),
+                        unit_price=float(it.get("unit_price", 0.0) or 0.0),
+                        amount=float(it.get("amount", 0.0) or 0.0),
+                        confidence=float(it.get("confidence", 0.0) or 0.0),
+                    ))
+                except Exception:
+                    continue
+        ctx.items = items
+        # Capture debug including any per-item 'sources'
+        try:
+            ctx.debug.setdefault("items", {})
+            ctx.debug["items"].update({
+                "prompt": items_tmpl,
+                "prompt_filled": pre,
+                "prompt_full": prompt,
+                "response_raw": text,
+                "response_json": obj,
+                "stats": {
+                    "prompt_tokens": data.get("prompt_eval_count"),
+                    "completion_tokens": data.get("eval_count"),
+                },
+            })
+        except Exception:
+            pass
+        return ctx, data
+
+
+class ReconcileExpert(BaseExpert):
+    name = "reconcile"
+
+    def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
+        # No LLM call; deterministic checks
+        sum_items = float(sum(max(0.0, float(i.amount or 0.0)) for i in ctx.items)) if ctx.items else 0.0
+        # If subtotal is missing but items exist, set subtotal
+        if ctx.items and (ctx.meta.payment.subtotal or 0.0) <= 0.0:
+            ctx.meta.payment.subtotal = round(sum_items, 2)
+        # Compute implied total from parts
+        implied_total = round((ctx.meta.payment.subtotal or 0.0)
+                              + (ctx.meta.payment.tax or 0.0)
+                              + (ctx.meta.payment.tip or 0.0)
+                              + (ctx.meta.payment.fees or 0.0)
+                              - (ctx.meta.payment.discounts or 0.0), 2)
+        # If header total missing but implied exists, fill it
+        if (ctx.meta.total or 0.0) <= 0.0 and implied_total > 0.0:
+            ctx.meta.total = implied_total
+        # If header total present and implied diff is significant, warn
+        try:
+            if ctx.meta.total and abs(implied_total - ctx.meta.total) > 0.01 and (ctx.meta.payment.subtotal or 0.0) > 0.0:
+                ctx.warnings.append("reconcile-mismatch")
+        except Exception:
+            pass
+        return ctx, {"_client_wall_sec": 0.0}
+
+
+# ---- Health ----
+# Probe Ollama endpoint/model availability and return a status summary dict.
 def ollama_health() -> Dict[str, object]:
     """Check Ollama endpoint and model availability.
 
@@ -79,10 +328,11 @@ def ollama_health() -> Dict[str, object]:
         info["error"] = str(e)
     return info
 
+# Expert pipeline using Ollama: meta -> items -> reconcile
 def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict:
-    """Two-pass LLM extraction: pass 1 (meta), pass 2 (items), then combine.
+    """Sequential experts pipeline: Meta -> Items -> Reconcile.
 
-    On any failure, returns empty defaults so the UI can allow manual entry.
+    Returns fields dict compatible with previous API and includes metrics.
     """
     try:
         # Prep and cleanup
@@ -93,170 +343,89 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         ocr_clean = "\n".join([" ".join(part.split()) for part in raw_lines_list]).strip()
         cleaned_text_lines_list = ocr_clean.split("\n") if ocr_clean else []
 
-        def _looks_useful(line: str) -> bool:
-            if not line:
-                return False
-            s = str(line).strip()
-            if len(s) <= 1:
-                return False
-            return any(c.isdigit() for c in s) or any(ch in s for ch in "$€£%") or len(s) >= 4
-
-        ocr_lines_clean = [ln for ln in (ocr_lines or []) if _looks_useful(ln)]
-
         def cfg(name: str, default: Any = None) -> Any:
             if overrides is not None and name in overrides:
                 return overrides[name]
             return getattr(settings, name, default)
 
         used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
+        timeout = int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT))
         max_lines = int(cfg("LLM_MAX_LINES", 250))
 
-        # Build OCR lines preview block
-        lines_block = ""
-        included_lines_count = 0
-        if ocr_lines_clean:
-            preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
-            if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
-                preview_lines = preview_lines[:max_lines]
-            included_lines_count = len(preview_lines)
-            lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
+        # Line block
+        ocr_lines_clean = _filter_useful_lines(ocr_lines)
+        preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
+        if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
+            preview_lines = preview_lines[:max_lines]
+        included_lines_count = len(preview_lines)
+        lines_block = ("\nOCR LINES (indexed):\n" + "\n".join(preview_lines)) if preview_lines else ""
 
-        # Pass 1: META (use indexed lines only)
-        prompt_parts_meta: List[str] = [META_PROMPT]
-        if lines_block:
-            prompt_parts_meta.append(lines_block)
-        prompt_meta = "\n\n".join([p for p in prompt_parts_meta if p]) + "\n"
-        meta_chars = len(prompt_meta)
-        meta_lines = prompt_meta.count("\n") + 1
-        _ = max(0.0, time.perf_counter() - tprep0)  # prep time measured but not used directly here
-
-        url = f"{settings.OLLAMA_ENDPOINT}/api/generate"
-        t0 = time.perf_counter()
-        r1 = _http_post(
-            url,
-            {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"},
-            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
-        )
-        r1.raise_for_status()
-        d1 = r1.json()
-        t1 = time.perf_counter()
-
-        text_meta = (d1.get("response", "") or "").strip()
-        # Robust JSON extract
+        ctx = PipelineContext(raw_text=raw_no_cr, ocr_lines=ocr_lines_clean)
+        client = LlmClient(model=used_model, endpoint=settings.OLLAMA_ENDPOINT, timeout=timeout)
+        # Record shared debug inputs
         try:
-            s = text_meta.find("{")
-            e = text_meta.rfind("}")
-            meta_obj = json.loads(text_meta[s:e+1] if s != -1 and e != -1 else text_meta)
+            ctx.debug.update({
+                "model": used_model,
+                "endpoint": settings.OLLAMA_ENDPOINT,
+                "lines_block": lines_block,
+                "ocr_lines": ocr_lines_clean,
+            })
         except Exception:
-            meta_obj = {}
+            pass
 
-        def _f(x) -> float:
-            try:
-                return float(x)
-            except Exception:
-                return 0.0
+        # Run experts sequentially
+        meta_expert = MetaExpert()
+        items_expert = ItemsExpert()
+        recon_expert = ReconcileExpert()
 
-        date = str(meta_obj.get("date", "") or "").strip()
-        payee = str(meta_obj.get("payee", "") or "").strip()
-        total = _f(meta_obj.get("total", 0))
-        psrc = meta_obj.get("payment", {}) or {}
-        payment = {
-            "subtotal": _f(psrc.get("subtotal", 0)),
-            "tax": _f(psrc.get("tax", 0)),
-            "tip": _f(psrc.get("tip", 0)),
-            "discounts": _f(psrc.get("discounts", 0)),
-            "fees": _f(psrc.get("fees", 0)),
-            "method": str(psrc.get("method", "") or ""),
-            "last4": str(psrc.get("last4", "") or ""),
-        }
+        ctx, d1 = meta_expert.run(client, ctx, lines_block)
+        ctx, d2 = items_expert.run(client, ctx, lines_block)
+        ctx, _ = recon_expert.run(client, ctx, lines_block)
 
-        # Pass 2: ITEMS
-        # Build items preamble manually to avoid str.format brace conflicts with JSON example
-        items_preamble = (
-            "You are extracting ITEM LINES from a receipt using OCR LINES (indexed).\n"
-            "Use this context to avoid misclassifying totals as items:\n"
-            f"PAYEE: {payee}\n"
-            f"DATE: {date}\n"
-            f"TOTAL_HINT: {total}\n"
-            f"PAYMENT: method={payment.get('method','')} last4={payment.get('last4','')}\n\n"
-            "Input format:\n"
-            "- OCR LINES are provided as 'i: <text>' where i starts at 0 in reading order (top-to-bottom, left-to-right).\n"
-            "- Use only indices present in OCR LINES; do not invent numbers.\n"
-            "- If an item spans multiple adjacent lines, set line_index to the first line's index and set ocr_text to the concatenation (or best summary) of those lines.\n\n"
-            "Return ONLY valid JSON in this exact shape:\n"
-            "{\n"
-            '    "items": [\n'
-            '        {"line_index": -1, "ocr_text": "", "name": "", "qty": 0.0, "unit_price": 0.0, "amount": 0.0, "confidence": 0.0}\n'
-            "    ]\n"
-            "}\n\n"
-            "Rules for items:\n"
-            "- Map each item to the appropriate line_index from OCR LINES; set ocr_text to the related text (you may combine adjacent lines when an item spans multiple lines).\n"
-            "- Merge multi-line items where quantity/weight/unit-price are on separate lines (common for produce and weighed goods).\n"
-            '- Handle multi-quantity patterns (e.g., "x3", "3 @ 0.99", or "3 for 2.99"). Compute qty, unit_price, and amount accordingly.\n'
-            "- For multi-line items return only the first line_index.\n"
-            "- Ignore non-item lines like headers, SUBTOTAL, TAX, TOTAL, and payment details.\n"
-            "- Provide your guess confidence for each item. Confidence is a sliding range from 0.0–1.0.\n"
-        )
+        # Build outputs
+        payment_dict = ctx.meta.payment.model_dump()
+        items_out = [i.model_dump() for i in ctx.items]
 
-        prompt_parts_items: List[str] = [items_preamble]
-        if lines_block:
-            prompt_parts_items.append(lines_block)
-        prompt_items = "\n\n".join([p for p in prompt_parts_items if p]) + "\n"
-
-        t2 = time.perf_counter()
-        r2 = _http_post(
-            url,
-            {"model": used_model, "prompt": prompt_items, "stream": False, "format": "json"},
-            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
-        )
-        r2.raise_for_status()
-        d2 = r2.json()
-        t3 = time.perf_counter()
-
-        text_items = (d2.get("response", "") or "").strip()
-        try:
-            s2 = text_items.find("{")
-            e2 = text_items.rfind("}")
-            items_obj = json.loads(text_items[s2:e2+1] if s2 != -1 and e2 != -1 else text_items)
-        except Exception:
-            items_obj = {}
-
-        items_raw = items_obj.get("items") or []
-        items: List[Dict[str, Any]] = []
-        if isinstance(items_raw, list):
-            for it in items_raw:
-                if not isinstance(it, dict):
-                    continue
-                try:
-                    items.append({
-                        "line_index": int(it.get("line_index", -1) or -1),
-                        "ocr_text": str(it.get("ocr_text", "") or ""),
-                        "name": str(it.get("name", "") or ""),
-                        "qty": float(it.get("qty", 0.0) or 0.0),
-                        "unit_price": float(it.get("unit_price", 0.0) or 0.0),
-                        "amount": float(it.get("amount", 0.0) or 0.0),
-                        "confidence": float(it.get("confidence", 0.0) or 0.0),
-                    })
-                except Exception:
-                    # Skip malformed entries
-                    continue
-
-        # Metrics (aggregate light-weight)
+        # Metrics
         def _dur(ns):
             try:
                 return (float(ns)/1e9) if ns else None
             except Exception:
                 return None
 
+        # Aggregate metrics across both LLM calls (meta + items)
+        prompt_tokens = (int(d1.get("prompt_eval_count") or 0) + int(d2.get("prompt_eval_count") or 0))
+        completion_tokens = (int(d1.get("eval_count") or 0) + int(d2.get("eval_count") or 0))
+        total_sec = ( (_dur(d1.get("total_duration")) or 0.0) + (_dur(d2.get("total_duration")) or 0.0) )
+        prompt_eval_sec = ( (_dur(d1.get("prompt_eval_duration")) or 0.0) + (_dur(d2.get("prompt_eval_duration")) or 0.0) )
+        eval_sec = ( (_dur(d1.get("eval_duration")) or 0.0) + (_dur(d2.get("eval_duration")) or 0.0) )
+        wall_sec = max(0.0, max(d1.get("_client_wall_sec") or 0.0, 0.0) + max(d2.get("_client_wall_sec") or 0.0, 0.0))
+
+        # Prompt sizes from captured full prompts
+        meta_pf = str(((ctx.debug.get("meta") or {}).get("prompt_full") or ""))
+        items_pf = str(((ctx.debug.get("items") or {}).get("prompt_full") or ""))
+        prompt_chars = (len(meta_pf) + len(items_pf)) if (meta_pf or items_pf) else None
+        prompt_lines = None
+        try:
+            pl1 = meta_pf.count("\n") + (1 if meta_pf else 0)
+            pl2 = items_pf.count("\n") + (1 if items_pf else 0)
+            prompt_lines = pl1 + pl2 if (pl1 or pl2) else None
+        except Exception:
+            prompt_lines = None
+
+        # Throughputs
+        tps_completion = (float(completion_tokens) / float(eval_sec)) if eval_sec and eval_sec > 0 else None
+        tps_end_to_end = (float(completion_tokens) / float(wall_sec)) if wall_sec and wall_sec > 0 else None
+
         metrics = {
             "prompt": {
-                "chars": len(prompt_items) + meta_chars,
-                "lines": meta_lines,
+                "chars": prompt_chars,
+                "lines": prompt_lines,
                 "include_full_text": False,
                 "long_input": bool(max_lines and len(ocr_lines_clean) >= max_lines),
                 "indexed_lines": included_lines_count,
-                "max_chars": 0,
                 "max_lines": max_lines,
+                "max_chars": 0,
                 "cleanup": {
                     "raw_chars": len(raw_no_cr),
                     "raw_lines": len(raw_lines_list),
@@ -268,23 +437,36 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                 },
             },
             "response": {
-                "prompt_tokens": d1.get("prompt_eval_count"),
-                "completion_tokens": d1.get("eval_count"),
-                "items": len(items),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "items": len(items_out),
             },
             "timing": {
                 "prep_sec": max(0.0, time.perf_counter() - tprep0),
-                "meta_wall_sec": max(0.0, t1 - t0),
-                "items_wall_sec": max(0.0, t3 - t2),
-                "meta_total_sec": _dur(d1.get("total_duration")),
-                "meta_prompt_eval_sec": _dur(d1.get("prompt_eval_duration")),
-                "meta_eval_sec": _dur(d1.get("eval_duration")),
-                "items_total_sec": _dur(d2.get("total_duration")),
-                "items_prompt_eval_sec": _dur(d2.get("prompt_eval_duration")),
-                "items_eval_sec": _dur(d2.get("eval_duration")),
+                "wall_sec": wall_sec,
+                "total_sec": total_sec,
+                "prompt_eval_sec": prompt_eval_sec,
+                "eval_sec": eval_sec,
+                "tps_completion": tps_completion,
+                "tps_end_to_end": tps_end_to_end,
             },
         }
-        return {"date": date, "payee": payee, "total": total, "payment": payment, "items": items, "metrics": metrics}
+
+        out = {
+            "date": ctx.meta.date,
+            "payee": ctx.meta.payee,
+            "total": ctx.meta.total,
+            "payment": payment_dict,
+            "items": items_out,
+            "metrics": metrics,
+        }
+        # Include debug when DEBUG is enabled
+        try:
+            if getattr(settings, "DEBUG", False):
+                out["debug"] = ctx.debug
+        except Exception:
+            pass
+        return out
     except requests.exceptions.RequestException as e:
         logging.error("LLM HTTP error: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}, "items": []}
@@ -292,11 +474,9 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         logging.error("LLM extraction failed: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}, "items": []}
 
+# Fast path to extract only header/meta (date, payee, total, payment) from OCR lines via Ollama; returns fields + minimal metrics.
 def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict:
-    """Extract only header/meta fields quickly (date, payee, total, payment).
-
-    Returns keys: date, payee, total, payment, metrics(optional).
-    """
+    """Extract only header/meta fields quickly (date, payee, total, payment)."""
     try:
         tprep0 = time.perf_counter()
         raw = (ocr_text or "")
@@ -304,93 +484,38 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
         raw_lines_list = raw_no_cr.split("\n")
         ocr_clean = "\n".join([" ".join(part.split()) for part in raw_lines_list]).strip()
 
-        def _looks_useful(line: str) -> bool:
-            if not line:
-                return False
-            s = str(line).strip()
-            if len(s) <= 1:
-                return False
-            return any(c.isdigit() for c in s) or any(ch in s for ch in "$€£%") or len(s) >= 4
-
-        ocr_lines_clean = [ln for ln in (ocr_lines or []) if _looks_useful(ln)]
-
         def cfg(name: str, default: Any = None) -> Any:
             if overrides is not None and name in overrides:
                 return overrides[name]
             return getattr(settings, name, default)
 
         used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
+        timeout = int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT))
         max_lines = int(cfg("LLM_MAX_LINES", 250))
 
-        # Lines block
-        lines_block = ""
-        included_lines_count = 0
-        if ocr_lines_clean:
-            preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
-            if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
-                preview_lines = preview_lines[:max_lines]
-            included_lines_count = len(preview_lines)
-            lines_block = "\nOCR LINES (indexed):\n" + "\n".join(preview_lines)
+        ocr_lines_clean = _filter_useful_lines(ocr_lines)
+        preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
+        if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
+            preview_lines = preview_lines[:max_lines]
+        included_lines_count = len(preview_lines)
+        lines_block = ("\nOCR LINES (indexed):\n" + "\n".join(preview_lines)) if preview_lines else ""
 
-        # Build prompt
-        long_input = bool(max_lines and len(ocr_lines_clean) >= max_lines)
-        prompt_parts_meta: List[str] = [META_PROMPT]
-        if lines_block:
-            prompt_parts_meta.append(lines_block)
-        prompt_meta = "\n\n".join([p for p in prompt_parts_meta if p]) + "\n"
-        prompt_chars = len(prompt_meta)
-        prompt_line_count = prompt_meta.count("\n") + 1
-        _ = max(0.0, time.perf_counter() - tprep0)
+        # Build prompt (allow external override via prompts/meta_system.txt)
+        meta_tmpl = _read_prompt("meta_system.txt", META_PROMPT)
+        prompt_meta = f"{meta_tmpl}\n\n{lines_block}\n"
 
         # Call LLM
-        url = f"{settings.OLLAMA_ENDPOINT}/api/generate"
-        t0 = time.perf_counter()
-        resp = _http_post(
-            url,
-            {"model": used_model, "prompt": prompt_meta, "stream": False, "format": "json"},
-            int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT)),
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        t1 = time.perf_counter()
+        client = LlmClient(model=used_model, endpoint=settings.OLLAMA_ENDPOINT, timeout=timeout)
+        text, data = client.generate_json(prompt_meta)
 
-        text = (data.get("response", "") or "").strip()
-        # Parse
-        obj: Dict[str, Any] = {}
+        obj = _parse_json_object(text)
+        meta = Meta()
         try:
-            s = text.find("{")
-            e = text.rfind("}")
-            obj = json.loads(text[s:e+1] if s != -1 and e != -1 else text)
-        except Exception:
-            obj = {}
-
-        def _f(x) -> float:
-            try:
-                return float(x)
-            except Exception:
-                return 0.0
-
-        date = str(obj.get("date", "") or "").strip()
-        payee = str(obj.get("payee", "") or "").strip()
-        total = _f(obj.get("total", 0))
-        psrc = obj.get("payment", {}) or {}
-        payment = {
-            "subtotal": _f(psrc.get("subtotal", 0)),
-            "tax": _f(psrc.get("tax", 0)),
-            "tip": _f(psrc.get("tip", 0)),
-            "discounts": _f(psrc.get("discounts", 0)),
-            "fees": _f(psrc.get("fees", 0)),
-            "method": str(psrc.get("method", "") or ""),
-            "last4": str(psrc.get("last4", "") or ""),
-        }
+            meta = Meta.model_validate(obj)
+        except ValidationError:
+            pass
 
         # Metrics (minimal)
-        prompt_tokens = data.get("prompt_eval_count")
-        completion_tokens = data.get("eval_count")
-        total_ns = data.get("total_duration") or 0
-        eval_ns = data.get("eval_duration") or 0
-        prompt_eval_ns = data.get("prompt_eval_duration") or 0
-
         def _dur(ns):
             try:
                 return (float(ns)/1e9) if ns else None
@@ -399,23 +524,24 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
 
         metrics = {
             "prompt": {
-                "chars": prompt_chars,
-                "lines": prompt_line_count,
+                "chars": len(prompt_meta),
+                "lines": prompt_meta.count("\n") + 1,
                 "include_full_text": False,
                 "indexed_lines": included_lines_count,
             },
             "response": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
+                "prompt_tokens": data.get("prompt_eval_count"),
+                "completion_tokens": data.get("eval_count"),
             },
             "timing": {
-                "wall_sec": max(0.0, t1 - t0),
-                "total_sec": _dur(total_ns),
-                "prompt_eval_sec": _dur(prompt_eval_ns),
-                "eval_sec": _dur(eval_ns),
+                "wall_sec": max(0.0, float(data.get("_client_wall_sec") or 0.0)),
+                "total_sec": _dur(data.get("total_duration")),
+                "prompt_eval_sec": _dur(data.get("prompt_eval_duration")),
+                "eval_sec": _dur(data.get("eval_duration")),
+                "prep_sec": max(0.0, time.perf_counter() - tprep0),
             },
         }
-        return {"date": date, "payee": payee, "total": total, "payment": payment, "metrics": metrics}
+        return {"date": meta.date, "payee": meta.payee, "total": meta.total, "payment": meta.payment.model_dump(), "metrics": metrics}
     except Exception as e:
         logging.error("LLM meta extraction failed: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}}

@@ -1,5 +1,7 @@
+
 from .date_utils import normalize_date_to_mmddyyyy, parse_date_to_unix
 
+# Parse a size from free text like '12 oz' or '1.5 lb'; returns (value, unit)
 def parse_size(text: str):
 	"""Parse sizes like '8 oz', '1.5 lb', '500 g', '12 fl oz'. Returns (value, unit) or (None, None)."""
 	try:
@@ -19,6 +21,7 @@ def parse_size(text: str):
 		return (None, None)
 
 
+# Heuristically reduce a product description to a canonical abstract name
 def normalize_abstract_name(name: str) -> str:
 	"""Heuristic to canonicalize a product into an abstract concept (e.g., 'peanut butter')."""
 	s = (name or "").strip()

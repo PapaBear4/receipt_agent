@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS ynab_suggestions (
 """
 
 
+# Open a SQLite connection to the configured DB with Row factory.
 def _connect() -> sqlite3.Connection:
     Path(settings.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(settings.DB_PATH))
@@ -167,12 +168,14 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+# Ensure a column exists on a table; add it if missing (lightweight migration).
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
     cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+# Initialize database schema and run additive migrations for older DBs.
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA_SQL)
@@ -192,6 +195,7 @@ def init_db() -> None:
 
 
 # ---- YNAB mappings & suggestions ----
+# Create or update a durable mapping for YNAB resources; returns row id.
 def upsert_mapping(budget_id: str, kind: str, key: str, chosen_id: str, chosen_name: str | None = None) -> int:
     if not budget_id or not kind or not key or not chosen_id:
         return 0
@@ -213,6 +217,7 @@ def upsert_mapping(budget_id: str, kind: str, key: str, chosen_id: str, chosen_n
         return int(row[0]) if row else 0
 
 
+# Fetch a stored YNAB mapping by composite key.
 def get_mapping(budget_id: str, kind: str, key: str) -> dict | None:
     if not budget_id or not kind or not key:
         return None
@@ -221,6 +226,7 @@ def get_mapping(budget_id: str, kind: str, key: str) -> dict | None:
         return dict(row) if row else None
 
 
+# Store an ephemeral suggestion for YNAB selection with TTL; returns row id.
 def set_suggestion(budget_id: str, kind: str, key: str, guess_id: str | None, guess_name: str | None, confidence: float | None, model: str | None, prompt_hash: str | None, ttl_seconds: int = 30 * 24 * 3600) -> int:
     if not budget_id or not kind or not key:
         return 0
@@ -238,6 +244,7 @@ def set_suggestion(budget_id: str, kind: str, key: str, guess_id: str | None, gu
         return int(cur.lastrowid or 0)
 
 
+# Retrieve most recent, non-expired suggestion for a YNAB selection key.
 def get_suggestion(budget_id: str, kind: str, key: str) -> dict | None:
     if not budget_id or not kind or not key:
         return None
@@ -251,6 +258,7 @@ def get_suggestion(budget_id: str, kind: str, key: str) -> dict | None:
 
 
 # ---- Grocery catalog helpers ----
+# Insert category if missing and return its id.
 def upsert_category(name: str) -> int:
     name = (name or "").strip()
     if not name:
@@ -263,6 +271,7 @@ def upsert_category(name: str) -> int:
         return int(row[0]) if row else 0
 
 
+# Create/update a canonical abstract item by name; optional category and notes.
 def upsert_abstract_item(name: str, category: str | None = None, notes: str | None = None) -> int:
     nm = (name or "").strip()
     if not nm:
@@ -278,6 +287,7 @@ def upsert_abstract_item(name: str, category: str | None = None, notes: str | No
         return int(row[0]) if row else 0
 
 
+# Create or update a specific product variant under an abstract item; returns id.
 def upsert_item_variant(abstract_item_id: int, name: str, brand: str | None = None, size_value: float | None = None, size_unit: str | None = None, upc: str | None = None, attributes: dict | None = None, organic: bool | None = None, gluten_free: bool | None = None) -> int:
     if not abstract_item_id or not name:
         return 0
@@ -315,6 +325,7 @@ def upsert_item_variant(abstract_item_id: int, name: str, brand: str | None = No
         return int(row2[0]) if row2 else 0
 
 
+# Record a price observation for a variant at a merchant; optional links to receipt/line.
 def insert_price_capture(item_variant_id: int, merchant_id: int, price: float, captured_at: int, receipt_id: int | None = None, line_item_id: int | None = None, currency: str | None = None, unit_price: float | None = None, unit: str | None = None, promo: bool | None = None) -> int:
     if not item_variant_id or not merchant_id:
         return 0
@@ -331,6 +342,7 @@ def insert_price_capture(item_variant_id: int, merchant_id: int, price: float, c
         return int(cur.lastrowid or 0)
 
 
+# Fetch a single receipt row by id.
 def get_receipt(receipt_id: int) -> dict | None:
     if not receipt_id:
         return None
@@ -339,6 +351,7 @@ def get_receipt(receipt_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+# List abstract items with simple paging (most recently updated first).
 def list_abstract_items(limit: int = 100, offset: int = 0) -> list[dict]:
     with _connect() as conn:
         cur = conn.execute(
@@ -354,6 +367,7 @@ def list_abstract_items(limit: int = 100, offset: int = 0) -> list[dict]:
         return [ {k: row[idx] for idx,k in enumerate(cols)} for row in cur.fetchall() ]
 
 
+# List product variants for a given abstract item id.
 def list_variants_for_abstract(abstract_item_id: int) -> list[dict]:
     with _connect() as conn:
         cur = conn.execute(
@@ -369,6 +383,7 @@ def list_variants_for_abstract(abstract_item_id: int) -> list[dict]:
         return [ {k: row[idx] for idx,k in enumerate(cols)} for row in cur.fetchall() ]
 
 
+# Fetch recent price captures for a variant, joined with merchant name.
 def recent_prices_for_variant(item_variant_id: int, limit: int = 20) -> list[dict]:
     with _connect() as conn:
         cur = conn.execute(
@@ -386,6 +401,7 @@ def recent_prices_for_variant(item_variant_id: int, limit: int = 20) -> list[dic
         return [ {k: row[idx] for idx,k in enumerate(cols)} for row in cur.fetchall() ]
 
 
+# Insert merchant if missing and return its id.
 def upsert_merchant(name: str) -> int:
     name = (name or "").strip()
     if not name:
@@ -402,6 +418,7 @@ def upsert_merchant(name: str) -> int:
         return mid
 
 
+# Insert or update a receipt row with optional payment breakdown; returns receipt id.
 def insert_receipt(
     stored_name: str,
     original_name: str,
@@ -460,12 +477,14 @@ def insert_receipt(
         return rid
 
 
+# Delete all line items for a given receipt id.
 def clear_line_items(receipt_id: int) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM line_items WHERE receipt_id=?", (receipt_id,))
         conn.commit()
 
 
+# Bulk insert line items for a receipt; returns number inserted.
 def insert_line_items(receipt_id: int, items: Sequence[dict]) -> int:
     if not receipt_id or not items:
         return 0
@@ -493,6 +512,7 @@ def insert_line_items(receipt_id: int, items: Sequence[dict]) -> int:
         return len(rows)
 
 
+# Return all line items for a given receipt id.
 def get_line_items_for_receipt(receipt_id: int) -> list[dict]:
     if not receipt_id:
         return []
@@ -506,6 +526,7 @@ def get_line_items_for_receipt(receipt_id: int) -> list[dict]:
 
 
 # ---- Read-only DB inspection helpers ----
+# List non-internal SQLite tables in the database.
 def list_tables() -> List[str]:
     with _connect() as conn:
         rows = conn.execute(
@@ -514,18 +535,21 @@ def list_tables() -> List[str]:
         return [str(r[0]) for r in rows]
 
 
+# Return PRAGMA table_info for a table as list of dicts.
 def get_table_columns(table: str) -> List[Dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return [dict(r) for r in rows]
 
 
+# Count rows in a table.
 def get_table_count(table: str) -> int:
     with _connect() as conn:
         row = conn.execute(f"SELECT COUNT(1) AS c FROM {table}").fetchone()
         return int(row[0]) if row else 0
 
 
+# Page through rows of a table; returns list of dict rows.
 def get_table_rows(table: str, offset: int, limit: int) -> List[Dict[str, Any]]:
     if offset < 0:
         offset = 0
@@ -540,6 +564,7 @@ def get_table_rows(table: str, offset: int, limit: int) -> List[Dict[str, Any]]:
         return out
 
 
+# Persist a single LLM run metrics record for later analysis.
 def insert_llm_run(stored_name: str, model: str | None, metrics: dict) -> None:
     if not stored_name or not metrics:
         return
@@ -593,6 +618,7 @@ def insert_llm_run(stored_name: str, model: str | None, metrics: dict) -> None:
         conn.commit()
 
 
+# Aggregate llm_runs to summarize performance by model.
 def get_llm_stats() -> list[dict]:
     """Return basic aggregates of llm_runs grouped by model."""
     with _connect() as conn:
@@ -614,6 +640,7 @@ def get_llm_stats() -> list[dict]:
 
 
 # ---- Maintenance helpers (dangerous) ----
+# Danger: truncate a specific table (skips sqlite_*), resetting sequence best-effort.
 def clear_table(table: str) -> int:
     """Delete all rows from a user table. Returns rows affected (SQLite returns total changes)."""
     allowed = set(list_tables())
@@ -638,6 +665,7 @@ def clear_table(table: str) -> int:
             return 0
 
 
+# Danger: truncate all user tables (except those in exclude); returns per-table counts.
 def clear_all_tables(exclude: list[str] | None = None) -> dict:
     """Delete all rows from all user tables, optionally excluding some. Returns per-table counts."""
     excl = set(exclude or [])

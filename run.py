@@ -5,6 +5,7 @@ from app.config import settings
 import uvicorn
 
 
+# Build a Uvicorn-compatible logging config with rotating file output
 def build_log_config(level_name: str, log_file: str) -> dict:
     """Return a logging config aligned with Uvicorn that also formats app logs and writes to a rotating file."""
     return {

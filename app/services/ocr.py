@@ -26,6 +26,7 @@ This module focuses on robust OCR from an already-provided image array.
 """
 
 # Helper: cluster words into visual lines by Y position and sort lines top-to-bottom, then words left-to-right.
+# Group OCR word boxes into lines by vertical proximity; returns lines, line_ids, updated words.
 def _cluster_lines_by_y(words: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Given a flat list of word dicts with coords, build line clusters by Y.
 
@@ -93,6 +94,7 @@ def _cluster_lines_by_y(words: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"lines": lines, "line_ids": lids, "words": new_words}
 
 # Light, coordinate-stable preprocessing for OCR: BGR->grayscale + optional CLAHE; no resize/thresh.
+# Minimal preprocessing to improve OCR while preserving geometry and coords.
 def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
     """Light preprocessing intended not to destroy content.
     - Convert to grayscale
@@ -108,8 +110,8 @@ def _light_preprocess_for_tesseract(img_bgr: np.ndarray) -> np.ndarray:
         logger.debug("CLAHE failed, using plain grayscale: %s", e)
     return gray
 
-# Main OCR routine: tries preprocessing variants and PSMs, scores by words/lines, returns best result
-# including text, words with boxes, line_ids, and the exact image used (proc_image).
+# Main OCR routine: tries preprocessing variants and PSMs, scores by words/lines; returns best result + proc_image for overlays.
+# Run multi-variant Tesseract OCR with configurable options; returns text, lines, words, line_ids, size, proc_image.
 def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run OCR on a given (already cropped) image array with fallbacks.
 
@@ -465,6 +467,7 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     return best
 
 # Draw utility: renders all word boxes and optionally highlights specific line_ids (date/payee/total).
+# Render overlay rectangles on the provided image; optionally highlight date/payee/total regions.
 def draw_overlay_on_image(base_img: np.ndarray, words: List[Dict[str, Any]], line_ids: List[tuple],
                           highlights: Dict[str, tuple]) -> np.ndarray:
     """Draw word boxes and highlight selected line_ids on a provided image.

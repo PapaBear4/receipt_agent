@@ -2,6 +2,7 @@ from datetime import datetime
 from dateutil import parser
 
 
+# Normalize various date strings to MM/DD/YYYY for YNAB and UI
 def normalize_date_to_mmddyyyy(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
@@ -22,6 +23,7 @@ def normalize_date_to_mmddyyyy(raw: str) -> str:
     return dt.strftime("%m/%d/%Y")
 
 
+# Convert a date string into a Unix timestamp (seconds since epoch)
 def parse_date_to_unix(raw: str) -> int:
     raw = (raw or "").strip()
     if not raw:

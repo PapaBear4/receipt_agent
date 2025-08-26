@@ -52,11 +52,13 @@ USER_CONF_PATH = settings.DATA_DIR / "user_config.json"
 
 # --- Home route ---
 @app.get("/", response_class=HTMLResponse)
+# Render home page with quick links
 async def home(request: Request):
     return templates.TemplateResponse("home.html", {"request": request})
 
 
 @app.get("/favicon.ico")
+# Serve the SVG favicon from static assets
 async def favicon_redirect():
     # Serve SVG favicon from static
     fav = Path(__file__).parent / "static" / "favicon.svg"
@@ -66,17 +68,20 @@ async def favicon_redirect():
 
 # --- Upload page ---
 @app.get("/upload", response_class=HTMLResponse)
+# Show upload form for single-file flow
 async def upload_page(request: Request):
     return templates.TemplateResponse("upload.html", {"request": request})
 
 # --- YNAB: Settings (GET) ---
 @app.get("/settings/ynab", response_class=HTMLResponse)
+# Render YNAB settings page with budgets/accounts
 async def settings_ynab(request: Request):
     ctx = get_settings_context(request)
     return templates.TemplateResponse("settings_ynab.html", ctx)
 
 # --- YNAB: Metadata (GET) ---
 @app.get("/ynab/meta", response_class=HTMLResponse)
+# Render YNAB metadata explorer (budgets, accounts, categories)
 async def ynab_meta(request: Request):
     ctx = get_meta_context(request)
     return templates.TemplateResponse("ynab_meta.html", ctx)
@@ -98,6 +103,7 @@ def _save_user_conf(d: dict) -> None:
 csv_writer = CSVWriter(settings.CSV_PATH)
 
 @app.on_event("startup")
+# Initialize DB and start background JobManager
 async def _startup() -> None:
     try:
         init_db()
@@ -111,12 +117,14 @@ async def _startup() -> None:
 
 
 @app.post("/settings/ynab")
+# Persist selected YNAB budget ID from settings form
 async def settings_ynab_save(budget_id: str = Form("")):
     set_selected_budget_id(budget_id)
     return RedirectResponse(url="/settings/ynab", status_code=303)
 
 
 @app.post("/ynab/push")
+# Create and push a YNAB transaction for the reviewed receipt
 async def ynab_push(
     stored_filename: str = Form(...),
     date: str = Form(...),
@@ -138,6 +146,7 @@ async def ynab_push(
 
 
 @app.get("/metrics/llm.json")
+# Return aggregated LLM run statistics as JSON
 async def llm_metrics_json():
     try:
         stats = get_llm_stats()
@@ -148,6 +157,7 @@ async def llm_metrics_json():
 
 
 @app.get("/admin/db", response_class=HTMLResponse)
+# Minimal DB browser for tables, rows, and pagination
 async def db_browser(request: Request, table: Optional[str] = None, page: int = 1, size: int = 50):
     try:
         tables = list_tables()
@@ -186,6 +196,7 @@ async def db_browser(request: Request, table: Optional[str] = None, page: int = 
 
 
 @app.post("/admin/db/clear")
+# Clear all application tables (guarded by confirm)
 async def db_clear_all(confirm: str = Form("")):
     if confirm != "yes":
         return RedirectResponse(url="/admin/db", status_code=303)
@@ -195,6 +206,7 @@ async def db_clear_all(confirm: str = Form("")):
 
 
 @app.post("/admin/db/clear_table")
+# Clear a single table by name
 async def db_clear_table(table: str = Form(...)):
     if not table:
         return RedirectResponse(url="/admin/db", status_code=303)
@@ -206,6 +218,7 @@ async def db_clear_table(table: str = Form(...)):
 
 
 @app.get("/admin/items", response_class=HTMLResponse)
+# Admin UI for abstract items, variants, and recent prices
 async def admin_items(request: Request, abstract_id: Optional[int] = None):
     items = list_abstract_items(limit=200)
     variants = []
@@ -244,6 +257,23 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
         payment = (fields.get("payment") or {})
         items = (fields.get("items") or [])
         metrics = fields.get("metrics")
+        # Provenance (from debug, if available): meta sources and per-item field sources
+        dbg = fields.get("debug") or {}
+        meta_sources = None
+        item_sources: list[dict] = []
+        try:
+            meta_sources = (dbg.get("meta") or {}).get("sources")
+        except Exception:
+            meta_sources = None
+        try:
+            items_dbg = (dbg.get("items") or {}).get("response_json") or {}
+            raw_items = items_dbg.get("items") if isinstance(items_dbg, dict) else None
+            if isinstance(raw_items, list):
+                for it in raw_items:
+                    if isinstance(it, dict):
+                        item_sources.append(it.get("sources") or {})
+        except Exception:
+            item_sources = []
         # Pre-fill values
         date_val = normalize_date_to_mmddyyyy(str(fields.get("date", "")))
         payee_val = str(fields.get("payee", ""))
@@ -300,6 +330,8 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
             "ocr_lines": lines,
             "used_model": used_model,
             "metrics": metrics,
+            "meta_sources": meta_sources,
+            "item_sources": item_sources,
             "debug": settings.DEBUG,
             "config": settings,
         }
@@ -310,6 +342,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
 
 
 @app.get("/review", response_class=HTMLResponse)
+# Review a processed receipt; optionally rerun processing in the background
 async def review_existing(request: Request, file: str = Query(..., alias="file"), rerun: int = Query(0)):
     """Review a previously uploaded file by filename (under uploads).
     Cache-first: if cached fields + OCR exist and rerun=0, load them.
@@ -358,6 +391,7 @@ async def review_existing(request: Request, file: str = Query(..., alias="file")
 
 
 @app.post("/ynab/mapping/account")
+# Save a user-chosen mapping from card last4 to a YNAB account
 async def ynab_save_account_mapping(
     key_last4: str = Form(...),
     chosen_id: str = Form(...),
@@ -377,6 +411,7 @@ async def ynab_save_account_mapping(
 
 
 @app.post("/upload/batch", response_class=HTMLResponse)
+# Accept multiple files, dedupe by sha1, queue processing, then redirect to jobs
 async def upload_batch(request: Request, files: List[UploadFile] = File(...)):
     """Accept multiple files, dedupe by sha1, save, and provide links to review."""
     index_path = settings.DATA_DIR / "uploads_index.json"
@@ -436,6 +471,7 @@ async def upload_batch(request: Request, files: List[UploadFile] = File(...)):
 
 
 @app.get("/jobs", response_class=HTMLResponse)
+# List background jobs and link to review when done
 async def list_jobs(request: Request):
     jobs = job_manager.all()
     # Prepare a light view model
@@ -453,6 +489,7 @@ async def list_jobs(request: Request):
 
 
 @app.get("/processed", response_class=HTMLResponse)
+# Browse processed overlays and OCR artifacts with links to review
 async def list_processed(request: Request):
     # List processed overlays/fields pairs by reading the processed folder
     entries = []
@@ -480,6 +517,7 @@ async def list_processed(request: Request):
 
 
 @app.post("/admin/clear", response_class=HTMLResponse)
+# Clear uploads, processed artifacts, CSV, and jobs (when idle)
 async def admin_clear(request: Request):
     """Clear uploads, processed artifacts, and reset CSV. Guard if jobs are running."""
     if job_manager.any_busy():
@@ -519,6 +557,7 @@ async def admin_clear(request: Request):
 
 
 @app.post("/save")
+# Persist a reviewed receipt to CSV and DB; copy image to processed
 async def save_receipt(
     request: Request,
     stored_filename: str = Form(...),
@@ -689,6 +728,7 @@ async def save_receipt(
 
 
 @app.get("/download/csv")
+# Send the YNAB-formatted CSV for download
 async def download_csv():
     logger.info("CSV download requested: %s", settings.CSV_PATH)
     return FileResponse(str(settings.CSV_PATH), media_type="text/csv", filename="ynab_receipts.csv")
@@ -696,6 +736,7 @@ async def download_csv():
 
 # --- Lab: Tuning UI ---
 @app.get("/lab", response_class=HTMLResponse)
+# Render lab page with current uploads and defaults
 async def lab_get(request: Request):
     # List uploaded files
     uploads = []
@@ -720,6 +761,7 @@ async def lab_get(request: Request):
 
 
 @app.post("/lab/preview", response_class=HTMLResponse)
+# Run OCR + LLM with optional overrides and show overlay preview
 async def lab_preview(
     request: Request,
     filename: str = Form(...),
@@ -932,6 +974,7 @@ async def lab_preview(
 
 
 @app.post("/lab/ocr", response_class=HTMLResponse)
+# Run OCR only with overrides and show overlay
 async def lab_ocr(
     request: Request,
     filename: str = Form(...),
@@ -1100,6 +1143,7 @@ async def lab_ocr(
 
 
 @app.post("/lab/llm", response_class=HTMLResponse)
+# Run only the LLM against provided OCR lines
 async def lab_llm(
     request: Request,
     filename: str = Form(...),
@@ -1189,6 +1233,7 @@ async def lab_llm(
 
 
 @app.get("/docs/flow", response_class=HTMLResponse)
+# Render docs page that explains the end-to-end flow
 async def docs_flow(request: Request):
     """Render a page that explains the end-to-end data flow and key functions."""
     return templates.TemplateResponse("flow.html", {"request": request})

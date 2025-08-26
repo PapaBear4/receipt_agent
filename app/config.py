@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 
+# Load env vars from local files without overriding existing variables
 def _load_env_from_files() -> None:
     """Load key=value lines from optional local files into os.environ if not already set.
     Priority: repo/.env, ENV_FILE path, data/secrets.env.

@@ -126,14 +126,23 @@
         <div class="field">
           <label for="date">Date (MM/DD/YYYY)</label>
           <input id="date" name="date" type="text" value="{{ date }}" required />
+          {% if meta_sources and meta_sources.date %}
+            <div class="key-hint">src: line {{ meta_sources.date.line_index }} · conf {{ '%.2f'|format(meta_sources.date.confidence) }}</div>
+          {% endif %}
         </div>
         <div class="field">
           <label for="payee">Payee</label>
           <input id="payee" name="payee" type="text" value="{{ payee }}" required />
+          {% if meta_sources and meta_sources.payee %}
+            <div class="key-hint">src: line {{ meta_sources.payee.line_index }} · conf {{ '%.2f'|format(meta_sources.payee.confidence) }}</div>
+          {% endif %}
         </div>
         <div class="field">
           <label for="outflow">Outflow</label>
           <input id="outflow" name="outflow" type="text" value="{{ outflow }}" required />
+          {% if meta_sources and meta_sources.total %}
+            <div class="key-hint">src: line {{ meta_sources.total.line_index }} · conf {{ '%.2f'|format(meta_sources.total.confidence) }}</div>
+          {% endif %}
         </div>
         <div class="field">
           <label for="memo">Memo</label>
@@ -162,7 +171,11 @@
         <div class="field"><label>Discounts</label><input name="discounts" type="text" value="{{ payment.discounts if payment else '' }}" /></div>
         <div class="field"><label>Fees</label><input name="fees" type="text" value="{{ payment.fees if payment else '' }}" /></div>
         <div class="field"><label>Method</label><input name="method" type="text" value="{{ payment.method if payment else '' }}" /></div>
-        <div class="field"><label>Last 4</label><input name="last4" type="text" value="{{ payment.last4 if payment else '' }}" /></div>
+        <div class="field"><label>Last 4</label><input name="last4" type="text" value="{{ payment.last4 if payment else '' }}" />
+          {% if meta_sources and meta_sources.payment and meta_sources.payment.last4 %}
+            <div class="key-hint">src: line {{ meta_sources.payment.last4.line_index }} · conf {{ '%.2f'|format(meta_sources.payment.last4.confidence) }}</div>
+          {% endif %}
+        </div>
 
         <h3>Items</h3>
         <input type="hidden" name="items_json" id="items_json" />
@@ -175,6 +188,7 @@
               <th style="border-bottom:1px solid #ddd;">Unit</th>
               <th style="border-bottom:1px solid #ddd;">Amount</th>
               <th style="border-bottom:1px solid #ddd;">Conf</th>
+              <th style="border-bottom:1px solid #ddd;">Src</th>
             </tr>
           </thead>
           <tbody id="items_tbody">
@@ -186,6 +200,17 @@
               <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-unit" value="{{ '%.2f'|format(it.unit_price) if it.unit_price is defined else '' }}" step="0.01" /></td>
               <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-amount" value="{{ '%.2f'|format(it.amount) if it.amount is defined else '' }}" step="0.01" /></td>
               <td style="text-align:center; padding:4px 6px;"><input type="number" class="it-conf" value="{{ '%.2f'|format(it.confidence) if it.confidence is defined else '' }}" min="0" max="1" step="0.01" /></td>
+              <td style="padding:4px 6px; font-size:0.85rem; color:#666;">
+                {% set src = (item_sources[loop.index0] if item_sources and loop.index0 < item_sources|length else None) %}
+                {% if src %}
+                  {% if src.name %}<div>name: line {{ src.name.line_index }} · {{ '%.2f'|format(src.name.confidence if src.name.confidence is defined else 0) }}</div>{% endif %}
+                  {% if src.qty %}<div>qty: line {{ src.qty.line_index }} · {{ '%.2f'|format(src.qty.confidence if src.qty.confidence is defined else 0) }}</div>{% endif %}
+                  {% if src.unit_price %}<div>unit: line {{ src.unit_price.line_index }} · {{ '%.2f'|format(src.unit_price.confidence if src.unit_price.confidence is defined else 0) }}</div>{% endif %}
+                  {% if src.amount %}<div>amount: line {{ src.amount.line_index }} · {{ '%.2f'|format(src.amount.confidence if src.amount.confidence is defined else 0) }}</div>{% endif %}
+                {% else %}
+                  <span class="muted">—</span>
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>

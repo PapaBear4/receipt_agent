@@ -691,6 +691,8 @@ async def save_receipt(
                     from app.utils import parse_date_to_unix as _parse_unix
                     captured_at = _parse_unix(norm_date)
                     line_rows = get_line_items_for_receipt(rid)
+                    from app.services.enrichment import get_enricher
+                    enricher = get_enricher()
                     for lr in line_rows:
                         desc = (lr.get("description") or lr.get("ocr_text") or "").strip()
                         if not desc:
@@ -702,6 +704,20 @@ async def save_receipt(
                         # Parse size/unit heuristically
                         size_v, size_u = parse_size(desc)
                         vid = upsert_item_variant(aid, name=desc, brand=None, size_value=size_v, size_unit=size_u)
+                        # Enrich variant and persist to item_variants
+                        try:
+                            ei = enricher.enrich(payee, desc)
+                            if ei and vid:
+                                attrs = {
+                                    "enrich_provider": getattr(enricher, "provider", None),
+                                    "enrich_url": ei.url,
+                                    "enrich_image": ei.image,
+                                    "enrich_category": ei.category,
+                                    "enrich_sku": ei.sku,
+                                }
+                                upsert_item_variant(aid, name=desc, brand=ei.brand or None, attributes=attrs)
+                        except Exception:
+                            pass
                         price_amt = None
                         try:
                             price_amt = float(lr.get("amount") or 0)

@@ -153,6 +153,8 @@ class JobManager:
                         insert_line_items(rid, items)
                         # Seed abstract items, variants, and price captures (parity with manual save)
                         try:
+                            from app.services.enrichment import get_enricher
+                            enricher = get_enricher()
                             mid = upsert_merchant(payee)
                             captured_at = parse_date_to_unix(date) or int(time.time())
                             for lr in get_line_items_for_receipt(rid):
@@ -165,6 +167,20 @@ class JobManager:
                                 aid = upsert_abstract_item(abstract)
                                 size_v, size_u = parse_size(desc)
                                 vid = upsert_item_variant(aid, name=desc, brand=None, size_value=size_v, size_unit=size_u)
+                                # Enrich variant and persist to item_variants
+                                try:
+                                    ei = enricher.enrich(payee, desc)
+                                    if ei and vid:
+                                        attrs = {
+                                            "enrich_provider": getattr(enricher, "provider", None),
+                                            "enrich_url": ei.url,
+                                            "enrich_image": ei.image,
+                                            "enrich_category": ei.category,
+                                            "enrich_sku": ei.sku,
+                                        }
+                                        upsert_item_variant(aid, name=desc, brand=ei.brand or None, attributes=attrs)
+                                except Exception:
+                                    pass
                                 price_amt = None
                                 try:
                                     price_amt = float(lr.get("amount") or 0)

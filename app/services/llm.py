@@ -8,6 +8,7 @@ from pathlib import Path
 from app.config import settings
 
 from pydantic import BaseModel, Field, ValidationError
+from app.services.enrichment import get_enricher
 
 # ---- Models ----
 
@@ -190,6 +191,29 @@ class ItemsExpert(BaseExpert):
                 except Exception:
                     continue
         ctx.items = items
+
+        # Optional enrichment pass (non-blocking if disabled)
+        try:
+            enricher = get_enricher()
+            enriched = []
+            vendor = (ctx.meta.payee or "").strip()
+            for it in items[:10]:  # cap quick pass
+                q = (it.name or it.ocr_text).strip()
+                if not q:
+                    continue
+                ei = enricher.enrich(vendor, q)
+                if ei:
+                    enriched.append({
+                        "line_index": it.line_index,
+                        "query": q,
+                        "result": ei.__dict__,
+                    })
+            if enriched:
+                ctx.debug.setdefault("items", {})
+                ctx.debug["items"]["enrichment"] = enriched
+        except Exception:
+            # Keep enrichment best-effort
+            pass
         # Capture debug including any per-item 'sources'
         try:
             ctx.debug.setdefault("items", {})
@@ -413,74 +437,3 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         logging.error("LLM extraction failed: %s", e)
         return {"date": "", "payee": "", "total": 0.0, "payment": {}, "items": []}
 
-# Fast path to extract only header/meta (date, payee, total, payment) from OCR lines via Ollama; returns fields + minimal metrics.
-def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None, overrides: Optional[Dict[str, Any]] = None) -> Dict:
-    """Extract only header/meta fields quickly (date, payee, total, payment)."""
-    try:
-        tprep0 = time.perf_counter()
-        raw = (ocr_text or "")
-        raw_no_cr = raw.replace("\r", "")
-        raw_lines_list = raw_no_cr.split("\n")
-        ocr_clean = "\n".join([" ".join(part.split()) for part in raw_lines_list]).strip()
-
-        def cfg(name: str, default: Any = None) -> Any:
-            if overrides is not None and name in overrides:
-                return overrides[name]
-            return getattr(settings, name, default)
-
-        used_model = str(cfg("OLLAMA_MODEL", settings.OLLAMA_MODEL))
-        timeout = int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT))
-        max_lines = int(cfg("LLM_MAX_LINES", 250))
-
-        ocr_lines_clean = _filter_useful_lines(ocr_lines)
-        preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
-        if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
-            preview_lines = preview_lines[:max_lines]
-        included_lines_count = len(preview_lines)
-        lines_block = ("\nOCR LINES (indexed):\n" + "\n".join(preview_lines)) if preview_lines else ""
-
-        # Build prompt (file-only via prompts/meta_system.txt)
-        meta_tmpl = _read_prompt("meta_system.txt")
-        prompt_meta = f"{meta_tmpl}\n\n{lines_block}\n"
-
-        # Call LLM
-        client = LlmClient(model=used_model, endpoint=settings.OLLAMA_ENDPOINT, timeout=timeout)
-        text, data = client.generate_json(prompt_meta)
-
-        obj = _parse_json_object(text)
-        meta = Meta()
-        try:
-            meta = Meta.model_validate(obj)
-        except ValidationError:
-            pass
-
-        # Metrics (minimal)
-        def _dur(ns):
-            try:
-                return (float(ns)/1e9) if ns else None
-            except Exception:
-                return None
-
-        metrics = {
-            "prompt": {
-                "chars": len(prompt_meta),
-                "lines": prompt_meta.count("\n") + 1,
-                "include_full_text": False,
-                "indexed_lines": included_lines_count,
-            },
-            "response": {
-                "prompt_tokens": data.get("prompt_eval_count"),
-                "completion_tokens": data.get("eval_count"),
-            },
-            "timing": {
-                "wall_sec": max(0.0, float(data.get("_client_wall_sec") or 0.0)),
-                "total_sec": _dur(data.get("total_duration")),
-                "prompt_eval_sec": _dur(data.get("prompt_eval_duration")),
-                "eval_sec": _dur(data.get("eval_duration")),
-                "prep_sec": max(0.0, time.perf_counter() - tprep0),
-            },
-        }
-        return {"date": meta.date, "payee": meta.payee, "total": meta.total, "payment": meta.payment.model_dump(), "metrics": metrics}
-    except Exception as e:
-        logging.error("LLM meta extraction failed: %s", e)
-        return {"date": "", "payee": "", "total": 0.0, "payment": {}}

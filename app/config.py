@@ -159,6 +159,20 @@ class Settings:
     OCR_Y_CLUSTER_TOL_FRAC: float = float(os.getenv("OCR_Y_CLUSTER_TOL_FRAC", "0.60"))
     OCR_Y_CLUSTER_MIN_PX: int = int(os.getenv("OCR_Y_CLUSTER_MIN_PX", "6"))
 
+    # Item enrichment (optional web lookup)
+    # Enable web enrichment to fetch better product metadata from vendor sites or search.
+    ENRICH_ENABLED: bool = os.getenv("ENRICH_ENABLED", "false").lower() in {"1", "true", "yes"}
+    # Provider: 'bing', 'serpapi', or 'none' (uses simple fetch with guessed URLs)
+    ENRICH_PROVIDER: str = os.getenv("ENRICH_PROVIDER", "none")
+    ENRICH_SEARCH_API_KEY: str | None = os.getenv("ENRICH_SEARCH_API_KEY")
+    ENRICH_MAX_RESULTS: int = int(os.getenv("ENRICH_MAX_RESULTS", "3"))
+    ENRICH_TIMEOUT: int = int(os.getenv("ENRICH_TIMEOUT", "12"))  # seconds
+    ENRICH_RATE_LIMIT_PER_MIN: int = int(os.getenv("ENRICH_RATE_LIMIT_PER_MIN", "10"))
+    ENRICH_USER_AGENT: str = os.getenv(
+        "ENRICH_USER_AGENT",
+        "receipt-agent/1.0 (+https://example.com; contact: dev@example.com)"
+    )
+
 
 settings = Settings()
 

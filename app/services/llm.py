@@ -9,68 +9,6 @@ from app.config import settings
 
 from pydantic import BaseModel, Field, ValidationError
 
-# Two-pass prompts
-META_PROMPT = (
-        """
-System: You are a precise receipt metadata expert. You extract ONLY header fields (no items).
-
-Return ONLY valid JSON matching exactly:
-{
-    "date": "",
-    "payee": "",
-    "total": 0.0,
-    "payment": {
-        "subtotal": 0.0,
-        "tax": 0.0,
-        "tip": 0.0,
-        "discounts": 0.0,
-        "fees": 0.0,
-        "method": "",
-        "last4": ""
-    }
-}
-
-Rules:
-- Identify merchant/store name (payee).
-- Parse purchase date (prefer MM/DD/YYYY; best-effort otherwise).
-- Determine final total charged; fill payment breakouts if present.
-- Infer payment method and card last4 if present.
-
-Input format:
-- OCR LINES are provided below as "i: <text>" in reading order; only use indices that exist.
-Output: JSON only.
-"""
-)
-
-ITEMS_PROMPT_PREAMBLE = (
-        """
-System: You are a receipt line-items expert. Extract purchasable items only.
-
-Context hints (from previous step):
-- PAYEE: {payee}
-- DATE: {date}
-- TOTAL_HINT: {total}
-- PAYMENT: method={method} last4={last4}
-
-Input format:
-- OCR LINES are provided below as 'i: <text>' in reading order; only use existing indices.
-- If an item spans multiple adjacent lines, use the first line index and set ocr_text to the best combined text.
-
-Return ONLY valid JSON in this exact shape:
-{{
-    "items": [
-        {{"line_index": -1, "ocr_text": "", "name": "", "qty": 0.0, "unit_price": 0.0, "amount": 0.0, "confidence": 0.0}}
-    ]
-}}
-
-Rules for items:
-- Map each item to the appropriate line_index; combine adjacent lines when needed.
-- Handle multi-quantity patterns (e.g., "x3", "3 @ 0.99", "3 for 2.99").
-- Ignore headers and summary lines (SUBTOTAL, TAX, TOTAL, payments, card info).
-- Provide confidence 0.0–1.0 per item.
-"""
-)
-
 # ---- Models ----
 
 class Payment(BaseModel):
@@ -121,17 +59,18 @@ def _http_post(url: str, payload: dict, timeout: int) -> requests.Response:
         time.sleep(0.3)
         return requests.post(url, json=payload, timeout=timeout)
 
-# Prompt file loader with fallback to built-in defaults
+# Prompt file loader (file-only; no inline defaults)
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
-def _read_prompt(filename: str, default_text: str) -> str:
+def _read_prompt(filename: str) -> str:
+    """Read a prompt file; raise if missing or unreadable (file-only prompts)."""
+    p = _PROMPTS_DIR / filename
+    if not p.exists():
+        raise FileNotFoundError(f"Prompt file not found: {p}")
     try:
-        p = _PROMPTS_DIR / filename
-        if p.exists():
-            return p.read_text()
-    except Exception:
-        pass
-    return default_text
+        return p.read_text()
+    except Exception as e:
+        raise IOError(f"Failed to read prompt file {p}: {e}")
 
 # Extract JSON object from a possibly-noisy text response.
 def _parse_json_object(text: str) -> dict:
@@ -189,7 +128,7 @@ class MetaExpert(BaseExpert):
     name = "meta"
 
     def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
-        meta_tmpl = _read_prompt("meta_system.txt", META_PROMPT)
+        meta_tmpl = _read_prompt("meta_system.txt")
         prompt = f"{meta_tmpl}\n\n{lines_block}\n"
         text, data = client.generate_json(prompt)
         obj = _parse_json_object(text)
@@ -221,7 +160,7 @@ class ItemsExpert(BaseExpert):
     name = "items"
 
     def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
-        items_tmpl = _read_prompt("items_system.txt", ITEMS_PROMPT_PREAMBLE)
+        items_tmpl = _read_prompt("items_system.txt")
         pre = items_tmpl.format(
             payee=ctx.meta.payee,
             date=ctx.meta.date,
@@ -500,8 +439,8 @@ def extract_meta_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = None,
         included_lines_count = len(preview_lines)
         lines_block = ("\nOCR LINES (indexed):\n" + "\n".join(preview_lines)) if preview_lines else ""
 
-        # Build prompt (allow external override via prompts/meta_system.txt)
-        meta_tmpl = _read_prompt("meta_system.txt", META_PROMPT)
+        # Build prompt (file-only via prompts/meta_system.txt)
+        meta_tmpl = _read_prompt("meta_system.txt")
         prompt_meta = f"{meta_tmpl}\n\n{lines_block}\n"
 
         # Call LLM

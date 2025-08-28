@@ -74,7 +74,9 @@
   {% if metrics %}
   <div class="card" style="margin:1rem 0;">
     <h3 style="margin-top:0;">LLM Metrics</h3>
-    <div style="display:flex; flex-wrap:wrap; gap:1rem;">
+    <details>
+      <summary style="cursor:pointer; color:#0366d6;">Show summary</summary>
+      <div style="display:flex; flex-wrap:wrap; gap:1rem; margin-top:0.75rem;">
       <div>
         <div><strong>Prompt</strong></div>
         <div>Chars: {{ metrics.prompt.chars }}</div>
@@ -105,7 +107,43 @@
   <div>TPS (completion): {{ '%.1f'|format(metrics.timing.get('tps_completion')) if metrics.timing and metrics.timing.get('tps_completion') is not none else 'n/a' }}</div>
   <div>TPS (end-to-end): {{ '%.1f'|format(metrics.timing.get('tps_end_to_end')) if metrics.timing and metrics.timing.get('tps_end_to_end') is not none else 'n/a' }}</div>
       </div>
-    </div>
+      </div>
+    </details>
+    {% if llm_debug %}
+    <details style="margin-top:0.75rem;">
+      <summary style="cursor:pointer; color:#0366d6;">Show raw LLM inputs/outputs</summary>
+      <div style="display:grid; grid-template-columns: 1fr; gap:1rem; margin-top:0.75rem;">
+        {% set meta_dbg = llm_debug.meta if llm_debug and llm_debug.meta else None %}
+        {% if meta_dbg %}
+        <div class="card" style="background:#fafafa;">
+          <h4 style="margin:0 0 0.5rem 0;">Meta call</h4>
+          <details open>
+            <summary>Prompt</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ meta_dbg.prompt_full | e }}</pre>
+          </details>
+          <details>
+            <summary>Raw response</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ meta_dbg.response_raw | e }}</pre>
+          </details>
+        </div>
+        {% endif %}
+        {% set items_dbg = llm_debug.items if llm_debug and llm_debug.items else None %}
+        {% if items_dbg %}
+        <div class="card" style="background:#fafafa;">
+          <h4 style="margin:0 0 0.5rem 0;">Items call</h4>
+          <details open>
+            <summary>Prompt</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ items_dbg.prompt_full | e }}</pre>
+          </details>
+          <details>
+            <summary>Raw response</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ items_dbg.response_raw | e }}</pre>
+          </details>
+        </div>
+        {% endif %}
+      </div>
+    </details>
+    {% endif %}
   </div>
   {% endif %}
   <p>

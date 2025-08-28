@@ -333,6 +333,7 @@ def _load_cached_review_context(request: Request, stored_name: str, original_nam
             "meta_sources": meta_sources,
             "item_sources": item_sources,
             "debug": settings.DEBUG,
+            "llm_debug": dbg,
             "config": settings,
         }
     except Exception as e:

@@ -12,7 +12,12 @@ import logging
 from app.config import settings
 from app.services.ocr import ocr_on_cropped_image, draw_overlay_on_image
 from app.services.llm import extract_fields_from_text
-from app.services.db import insert_llm_run
+from app.services.db import (
+    insert_llm_run, insert_receipt, clear_line_items, insert_line_items,
+    upsert_merchant, get_line_items_for_receipt, upsert_abstract_item,
+    upsert_item_variant, insert_price_capture,
+)
+from app.utils import parse_size, normalize_abstract_name, parse_date_to_unix
 
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,54 @@ class JobManager:
                 insert_llm_run(job.stored_name, used_model, fields["metrics"])  # type: ignore[arg-type]
         except Exception:
             logger.debug("llm_run insert failed for %s", job.stored_name)
+
+        # Optional: auto-save to DB (header + items) using extracted fields
+        try:
+            if settings.AUTO_SAVE_AFTER_EXTRACT:
+                date = str(fields.get("date") or "")
+                payee = str(fields.get("payee") or "")
+                total = float(fields.get("total") or 0)
+                payment = fields.get("payment") or {}
+                items = fields.get("items") or []
+                memo = f"Auto-saved from {job.original_name}"
+                rid = insert_receipt(job.stored_name, job.original_name, date, total, payee, memo, payment)
+                if rid and isinstance(items, list):
+                    try:
+                        clear_line_items(rid)
+                        insert_line_items(rid, items)
+                        # Seed abstract items, variants, and price captures (parity with manual save)
+                        try:
+                            mid = upsert_merchant(payee)
+                            captured_at = parse_date_to_unix(date) or int(time.time())
+                            for lr in get_line_items_for_receipt(rid):
+                                desc = (lr.get("description") or lr.get("ocr_text") or "").strip()
+                                if not desc:
+                                    continue
+                                abstract = normalize_abstract_name(desc)
+                                if not abstract:
+                                    continue
+                                aid = upsert_abstract_item(abstract)
+                                size_v, size_u = parse_size(desc)
+                                vid = upsert_item_variant(aid, name=desc, brand=None, size_value=size_v, size_unit=size_u)
+                                price_amt = None
+                                try:
+                                    price_amt = float(lr.get("amount") or 0)
+                                except Exception:
+                                    price_amt = None
+                                if vid and mid and (price_amt is not None) and price_amt > 0:
+                                    unit_price = None
+                                    if size_v and size_v > 0 and size_u:
+                                        try:
+                                            unit_price = price_amt / float(size_v)
+                                        except Exception:
+                                            unit_price = None
+                                    insert_price_capture(vid, mid, price_amt, captured_at, receipt_id=rid, line_item_id=int(lr.get("id") or 0), unit_price=unit_price, unit=size_u)
+                        except Exception:
+                            logger.debug("Auto-seed items/variants/prices failed for receipt id=%s", rid)
+                    except Exception:
+                        logger.debug("Failed to save line items for rid=%s", rid)
+        except Exception as e:
+            logger.debug("Auto-save failed for %s: %s", job.stored_name, e)
 
         # Save overlay
         try:

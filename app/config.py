@@ -87,6 +87,11 @@ class Settings:
     # Debugging
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
 
+    # Persistence: automatically save OCR/LLM results to DB after background extraction
+    # When true, the job pipeline writes receipts and line items immediately.
+    # Manual review via /save will update the same rows (ON CONFLICT for receipts; clears and reinserts items).
+    AUTO_SAVE_AFTER_EXTRACT: bool = os.getenv("AUTO_SAVE_AFTER_EXTRACT", "true").lower() in {"1", "true", "yes"}
+
     # YNAB API
     YNAB_API_BASE: str = os.getenv("YNAB_API_BASE", "https://api.ynab.com/v1")
     YNAB_TOKEN: str | None = os.getenv("YNAB_TOKEN")

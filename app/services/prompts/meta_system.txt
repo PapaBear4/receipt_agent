@@ -35,9 +35,10 @@ Rules:
 - Parse purchase date (prefer MM/DD/YYYY; best-effort otherwise).
 - Determine final total charged; fill payment breakouts if present.
 - Infer payment method and card last4 if present.
- - For each header value you extract (date, payee, total, and payment fields), include a source object with:
-   - line_index: the OCR LINES index you used (or -1 if unknown/derived), and
-   - confidence: a float 0.0–1.0 indicating how confident you are in that specific extraction from that line.
+- Card last4 will be a 4 digit number below the total charged, often near the payment method.
+- For each header value you extract (date, payee, total, and payment fields), include a source object with:
+  - line_index: the OCR LINES index you used (or -1 if unknown/derived), and
+  - confidence: a float 0.0–1.0 indicating how confident you are in that specific extraction from that line.
 
 Input format:
 - OCR LINES are provided below as "i: <text>" in reading order; only use indices that exist.

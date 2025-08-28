@@ -125,6 +125,76 @@ class BaseExpert:
         raise NotImplementedError
 
 
+class NormalizeExpert(BaseExpert):
+    name = "normalize"
+
+    def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
+        """Ask the LLM to normalize indexed OCR lines (fix common OCR errors, strip junk).
+
+        Expects a JSON like {"lines":[{"index":0,"text":"..."}, ...]} and updates ctx.ocr_lines in-place.
+        """
+        try:
+            tmpl = _read_prompt("normalize_system.txt")
+        except Exception as e:
+            # If prompt missing, skip normalization but capture warning
+            try:
+                ctx.warnings.append("normalize-prompt-missing")
+                ctx.debug.setdefault("normalize", {})
+                ctx.debug["normalize"]["error"] = str(e)
+            except Exception:
+                pass
+            return ctx, {"_client_wall_sec": 0.0}
+
+        prompt = f"{tmpl}\n\n{lines_block}\n"
+        text, data = client.generate_json(prompt)
+        obj = _parse_json_object(text)
+
+        # Build a mapping of index -> text from response
+        mapping = {}
+        if isinstance(obj, dict):
+            raw = obj.get("lines") or []
+            if isinstance(raw, list):
+                for it in raw:
+                    if not isinstance(it, dict):
+                        continue
+                    try:
+                        idx = int(it.get("index", -1) or -1)
+                        val = str(it.get("text", "") or "")
+                        mapping[idx] = val
+                    except Exception:
+                        continue
+
+        # Apply mapping to current ctx.ocr_lines, preserving length/order
+        try:
+            normalized = list(ctx.ocr_lines)
+            for k, v in mapping.items():
+                if 0 <= k < len(normalized):
+                    normalized[k] = v
+            ctx.ocr_lines = normalized
+        except Exception:
+            # Keep original lines on any failure
+            ctx.warnings.append("normalize-apply-failed")
+
+        # Capture debug details
+        try:
+            ctx.debug.setdefault("normalize", {})
+            ctx.debug["normalize"].update({
+                "prompt": tmpl,
+                "prompt_full": prompt,
+                "response_raw": text,
+                "response_json": obj,
+                "output_lines": list(ctx.ocr_lines),
+                "stats": {
+                    "prompt_tokens": data.get("prompt_eval_count"),
+                    "completion_tokens": data.get("eval_count"),
+                },
+            })
+        except Exception:
+            pass
+
+        return ctx, data
+
+
 class MetaExpert(BaseExpert):
     name = "meta"
 
@@ -315,7 +385,7 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         timeout = int(cfg("OLLAMA_TIMEOUT", settings.OLLAMA_TIMEOUT))
         max_lines = int(cfg("LLM_MAX_LINES", 250))
 
-        # Line block
+        # Line block (raw cleaned lines)
         ocr_lines_clean = _filter_useful_lines(ocr_lines)
         preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ocr_lines_clean)]
         if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
@@ -330,17 +400,33 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             ctx.debug.update({
                 "model": used_model,
                 "endpoint": settings.OLLAMA_ENDPOINT,
-                "lines_block": lines_block,
+                "lines_block_original": lines_block,
                 "ocr_lines": ocr_lines_clean,
             })
         except Exception:
             pass
 
         # Run experts sequentially
+        normalize_expert = NormalizeExpert()
         meta_expert = MetaExpert()
         items_expert = ItemsExpert()
         recon_expert = ReconcileExpert()
 
+        # 1) Normalize lines with LLM
+        ctx, d0 = normalize_expert.run(client, ctx, lines_block)
+
+        # Recompute lines_block from normalized lines for downstream experts
+        preview_lines = [f"{i}: {str(line)}" for i, line in enumerate(ctx.ocr_lines)]
+        if max_lines and max_lines > 0 and len(preview_lines) > max_lines:
+            preview_lines = preview_lines[:max_lines]
+        included_lines_count = len(preview_lines)
+        lines_block = ("\nOCR LINES (indexed):\n" + "\n".join(preview_lines)) if preview_lines else ""
+        try:
+            ctx.debug["lines_block"] = lines_block
+        except Exception:
+            pass
+
+        # 2) Extract meta, then 3) items, then 4) reconcile
         ctx, d1 = meta_expert.run(client, ctx, lines_block)
         ctx, d2 = items_expert.run(client, ctx, lines_block)
         ctx, _ = recon_expert.run(client, ctx, lines_block)
@@ -356,23 +442,47 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             except Exception:
                 return None
 
-        # Aggregate metrics across both LLM calls (meta + items)
-        prompt_tokens = (int(d1.get("prompt_eval_count") or 0) + int(d2.get("prompt_eval_count") or 0))
-        completion_tokens = (int(d1.get("eval_count") or 0) + int(d2.get("eval_count") or 0))
-        total_sec = ( (_dur(d1.get("total_duration")) or 0.0) + (_dur(d2.get("total_duration")) or 0.0) )
-        prompt_eval_sec = ( (_dur(d1.get("prompt_eval_duration")) or 0.0) + (_dur(d2.get("prompt_eval_duration")) or 0.0) )
-        eval_sec = ( (_dur(d1.get("eval_duration")) or 0.0) + (_dur(d2.get("eval_duration")) or 0.0) )
-        wall_sec = max(0.0, max(d1.get("_client_wall_sec") or 0.0, 0.0) + max(d2.get("_client_wall_sec") or 0.0, 0.0))
+        # Aggregate metrics across all LLM calls (normalize + meta + items)
+        def gi(d, k):
+            try:
+                return d.get(k)
+            except Exception:
+                return None
+
+        prompt_tokens = int((gi(d0, "prompt_eval_count") or 0)) + int((gi(d1, "prompt_eval_count") or 0)) + int((gi(d2, "prompt_eval_count") or 0))
+        completion_tokens = int((gi(d0, "eval_count") or 0)) + int((gi(d1, "eval_count") or 0)) + int((gi(d2, "eval_count") or 0))
+        total_sec = (
+            ( _dur(gi(d0, "total_duration")) or 0.0 ) +
+            ( _dur(gi(d1, "total_duration")) or 0.0 ) +
+            ( _dur(gi(d2, "total_duration")) or 0.0 )
+        )
+        prompt_eval_sec = (
+            ( _dur(gi(d0, "prompt_eval_duration")) or 0.0 ) +
+            ( _dur(gi(d1, "prompt_eval_duration")) or 0.0 ) +
+            ( _dur(gi(d2, "prompt_eval_duration")) or 0.0 )
+        )
+        eval_sec = (
+            ( _dur(gi(d0, "eval_duration")) or 0.0 ) +
+            ( _dur(gi(d1, "eval_duration")) or 0.0 ) +
+            ( _dur(gi(d2, "eval_duration")) or 0.0 )
+        )
+        wall_sec = max(0.0,
+            max(gi(d0, "_client_wall_sec") or 0.0, 0.0)
+            + max(gi(d1, "_client_wall_sec") or 0.0, 0.0)
+            + max(gi(d2, "_client_wall_sec") or 0.0, 0.0)
+        )
 
         # Prompt sizes from captured full prompts
+        norm_pf = str(((ctx.debug.get("normalize") or {}).get("prompt_full") or ""))
         meta_pf = str(((ctx.debug.get("meta") or {}).get("prompt_full") or ""))
         items_pf = str(((ctx.debug.get("items") or {}).get("prompt_full") or ""))
-        prompt_chars = (len(meta_pf) + len(items_pf)) if (meta_pf or items_pf) else None
+        prompt_chars = (len(norm_pf) + len(meta_pf) + len(items_pf)) if (norm_pf or meta_pf or items_pf) else None
         prompt_lines = None
         try:
+            pl0 = norm_pf.count("\n") + (1 if norm_pf else 0)
             pl1 = meta_pf.count("\n") + (1 if meta_pf else 0)
             pl2 = items_pf.count("\n") + (1 if items_pf else 0)
-            prompt_lines = pl1 + pl2 if (pl1 or pl2) else None
+            prompt_lines = pl0 + pl1 + pl2 if (pl0 or pl1 or pl2) else None
         except Exception:
             prompt_lines = None
 

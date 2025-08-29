@@ -397,6 +397,63 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             'size': (gray.shape[1], gray.shape[0]),
             'proc_image': cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
         }
+        # Full-width mode previously short-circuited before PAN fallback; run a quick masked-card pass here too
+        try:
+            if bool(getattr(settings, 'OCR_PAN_FALLBACK', True)):
+                pan_img_base = gray
+                # build alternative variants to help faint asterisks/digits
+                pan_variants: List[tuple[str, np.ndarray]] = [('gray', pan_img_base)]
+                try:
+                    pan_variants.append(('inv', cv2.bitwise_not(pan_img_base)))
+                    # light adaptive threshold
+                    block = int(getattr(settings, 'OCR_ADAPTIVE_BLOCK', 31))
+                    if block % 2 == 0:
+                        block += 1
+                    cval = int(getattr(settings, 'OCR_ADAPTIVE_C', 10))
+                    th = cv2.adaptiveThreshold(pan_img_base, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, cval)
+                    pan_variants.append(('thresh', th))
+                except Exception:
+                    pass
+                pan_whitelist = "*Xx#0123456789/- "
+                dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if bool(getattr(settings, 'OCR_DISABLE_DICTIONARY', False)) else ""
+                spaces_flag = "-c preserve_interword_spaces=1" if bool(getattr(settings, 'OCR_PRESERVE_SPACES', True)) else ""
+                dpi_flag = f"--dpi {int(getattr(settings, 'OCR_USER_DPI', 300))}"
+                pan_psms = [7, 6, 11]
+                pan_words: List[Dict[str, Any]] = []
+                for _, pv in pan_variants:
+                    for psm in pan_psms:
+                        try:
+                            pan_config = f"--oem {int(getattr(settings, 'OCR_OEM', 1))} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
+                            pil_img = Image.fromarray(pv)
+                            data = pytesseract.image_to_data(pil_img, lang=str(getattr(settings, 'TESSERACT_LANG', 'eng')), output_type=pytesseract.Output.DICT, config=pan_config)
+                            n = len(data.get('text', []))
+                            for j in range(n):
+                                txt = (data['text'][j] or '').strip()
+                                if not txt:
+                                    continue
+                                pan_words.append({'text': txt, 'left': int(data['left'][j]), 'top': int(data['top'][j]), 'width': int(data['width'][j]), 'height': int(data['height'][j]), 'line_id': (1,1,1)})
+                        except Exception:
+                            continue
+                if pan_words:
+                    grouped_pan = _cluster_lines_by_y(pan_words)
+                    pan_lines: List[str] = grouped_pan['lines']
+                    # Keep only plausible masked-card lines to avoid noise
+                    import re as _re
+                    MASKED_RE = _re.compile(r"(?:\*{2,}|X{2,}|x{2,}|#){2,}.*?\b\d{4}\b")
+                    filtered = [ln for ln in pan_lines if MASKED_RE.search(str(ln or ''))]
+                    if filtered:
+                        base_lines = result['lines']
+                        merged = list(base_lines)
+                        for ln in filtered:
+                            s = str(ln or '').strip()
+                            if not s:
+                                continue
+                            if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                                merged.append(s)
+                        result['lines'] = merged
+                        result['text'] = "\n".join(merged)
+        except Exception:
+            pass
         if DEBUG and debug_basename is not None:
             try:
                 out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
@@ -507,7 +564,19 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
     # Optional: masked PAN fallback pass to capture lines like "**** 1234"
     try:
         if bool(getattr(settings, 'OCR_PAN_FALLBACK', True)):
-            pan_img = gray  # use grayscale variant for stability
+            pan_img_base = gray  # use grayscale variant for stability
+            # Try multiple variants to improve faint symbols
+            pan_variants: List[tuple[str, np.ndarray]] = [('gray', pan_img_base)]
+            try:
+                pan_variants.append(('inv', cv2.bitwise_not(pan_img_base)))
+                block = int(OCR_ADAPTIVE_BLOCK)
+                if block % 2 == 0:
+                    block += 1
+                cval = int(OCR_ADAPTIVE_C)
+                th = cv2.adaptiveThreshold(pan_img_base, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, cval)
+                pan_variants.append(('thresh', th))
+            except Exception:
+                pass
             # Build a strict whitelist focused on masked PAN tokens
             pan_whitelist = "*Xx#0123456789/- "
             oem = OCR_OEM
@@ -517,42 +586,300 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
             # Try PSMs that treat short text lines well
             pan_psms = [7, 6, 11]
             pan_words: List[Dict[str, Any]] = []
-            for psm in pan_psms:
-                try:
-                    pan_config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
-                    pil_img = Image.fromarray(pan_img)
-                    data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=pan_config)
-                    n = len(data.get('text', []))
-                    for i in range(n):
-                        txt = (data['text'][i] or '').strip()
-                        if not txt:
-                            continue
-                        # keep low confidence too; masked lines can be faint
-                        left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-                        pan_words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': (1,1,1)})
-                except Exception as e:
-                    if DEBUG:
-                        logger.debug("PAN fallback PSM %s failed: %s", psm, e)
-                    continue
+            for _, pv in pan_variants:
+                for psm in pan_psms:
+                    try:
+                        pan_config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
+                        pil_img = Image.fromarray(pv)
+                        data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=pan_config)
+                        n = len(data.get('text', []))
+                        for i in range(n):
+                            txt = (data['text'][i] or '').strip()
+                            if not txt:
+                                continue
+                            # keep low confidence too; masked lines can be faint
+                            pan_words.append({'text': txt, 'left': int(data['left'][i]), 'top': int(data['top'][i]), 'width': int(data['width'][i]), 'height': int(data['height'][i]), 'line_id': (1,1,1)})
+                    except Exception as e:
+                        if DEBUG:
+                            logger.debug("PAN fallback PSM %s failed: %s", psm, e)
+                        continue
             if pan_words:
                 grouped_pan = _cluster_lines_by_y(pan_words)
                 pan_lines: List[str] = grouped_pan['lines']
-                # Merge new lines that are not already in best lines
-                base_lines = best['lines'] if best else []
-                merged = list(base_lines)
-                for ln in pan_lines:
-                    s = str(ln or '').strip()
-                    if not s:
+                # Merge only plausible masked card lines to avoid noise
+                import re as _re
+                MASKED_RE = _re.compile(r"(?:\*{2,}|X{2,}|x{2,}|#){2,}.*?\b\d{4}\b")
+                filtered = [ln for ln in pan_lines if MASKED_RE.search(str(ln or ''))]
+                if filtered:
+                    base_lines = best['lines'] if best else []
+                    merged = list(base_lines)
+                    for ln in filtered:
+                        s = str(ln or '').strip()
+                        if not s:
+                            continue
+                        # Deduplicate by simple containment; keep if not present in any existing line
+                        if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                            merged.append(s)
+                    if best is not None:
+                        best['lines'] = merged
+                        best['text'] = "\n".join(merged)
+
+            # ROI rescan just below payment method hints (DEBIT/CREDIT/PURCHASE)
+            try:
+                import re as _re
+                H, W = gray.shape[:2]
+                # Map words to line_ids and texts to locate candidate line positions
+                words = best.get('words', []) if isinstance(best, dict) else []
+                by_lid: Dict[tuple, List[Dict[str, Any]]] = {}
+                for w in words:
+                    lid_key = w.get('line_id')
+                    if isinstance(lid_key, tuple):
+                        by_lid.setdefault(lid_key, []).append(w)
+                # Build line text map using best lines order
+                line_texts = list(best.get('lines', []))
+                # Keyword set
+                KEYS = ('DEBIT', 'CREDIT', 'PURCHASE', 'CARD')
+                # Find lids whose concatenated words contain any of these keys
+                cand_lids: List[tuple] = []
+                # Approximate by scanning unique lids in order of top y
+                lids_sorted: List[tuple] = []
+                for lid, lst in by_lid.items():
+                    if not lst:
                         continue
-                    # Deduplicate by simple containment; keep if not present in any existing line
-                    if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
-                        merged.append(s)
-                if best is not None:
-                    best['lines'] = merged
-                    best['text'] = "\n".join(merged)
+                    lids_sorted.append((min(w['top'] for w in lst), lid))
+                lids_sorted.sort(key=lambda t: t[0])
+                for _, lid in lids_sorted:
+                    toks = [str(w.get('text', '')).strip() for w in by_lid.get(lid, [])]
+                    s = " ".join([t for t in toks if t])
+                    up = s.upper()
+                    if any(k in up for k in KEYS):
+                        cand_lids.append(lid)
+                if cand_lids:
+                    # compute median word height for band sizing
+                    heights = [max(1, int(w.get('height', 1))) for w in words]
+                    med_h = float(np.median(heights)) if heights else 16.0
+                    band_h = int(max(18.0, med_h * 2.5))
+                    pan_whitelist = "*Xx#0123456789/- "
+                    dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+                    spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+                    dpi_flag = f"--dpi {OCR_USER_DPI}"
+                    psms = [7]
+                    MASKED_RE = _re.compile(r"(?:\\*{2,}|X{2,}|x{2,}|#){2,}.*?\\b\\d{4}\\b")
+                    found_lines: List[str] = []
+                    for lid in cand_lids[:3]:  # limit to first few
+                        lst = by_lid.get(lid, [])
+                        if not lst:
+                            continue
+                        top = min(w['top'] for w in lst)
+                        y0 = int(min(H-1, max(0, top + int(med_h*0.8))))
+                        y1 = int(min(H, y0 + band_h))
+                        roi = gray[y0:y1, :]
+                        # variants
+                        variants = [('gray', roi)]
+                        try:
+                            variants.append(('inv', cv2.bitwise_not(roi)))
+                            block = int(OCR_ADAPTIVE_BLOCK)
+                            if block % 2 == 0: block += 1
+                            th = cv2.adaptiveThreshold(roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, int(OCR_ADAPTIVE_C))
+                            variants.append(('thresh', th))
+                        except Exception:
+                            pass
+                        for _, vv in variants:
+                            for psm in psms:
+                                try:
+                                    cfg_str = f"--oem {OCR_OEM} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
+                                    data = pytesseract.image_to_data(Image.fromarray(vv), lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=cfg_str)
+                                    n = len(data.get('text', []))
+                                    # Join tokens left-to-right in this ROI
+                                    toks = []
+                                    for i in range(n):
+                                        t = (data['text'][i] or '').strip()
+                                        if t:
+                                            toks.append((int(data['left'][i]), t))
+                                    toks.sort(key=lambda t: t[0])
+                                    s = " ".join(t for _, t in toks)
+                                    if s and (MASKED_RE.search(s) or _re.search(r"\\b\\d{4}\\b", s)):
+                                        found_lines.append(s)
+                                except Exception:
+                                    continue
+                    if found_lines:
+                        base_lines = best['lines'] if best else []
+                        merged = list(base_lines)
+                        for s in found_lines:
+                            s = s.strip()
+                            if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                                merged.append(s)
+                        if best is not None:
+                            best['lines'] = merged
+                            best['text'] = "\\n".join(merged)
+            except Exception:
+                pass
     except Exception as e:
         if DEBUG:
             logger.debug("PAN fallback failed: %s", e)
+
+    # Final attempt: ROI-based masked PAN search near payment keywords (DEBIT/CREDIT/PURCHASE)
+    try:
+        import re as _re
+        MASKED_RE = _re.compile(r"(?:\*{2,}|X{2,}|x{2,}|#){2,}.*?\b\d{4}\b")
+        already = any(MASKED_RE.search(str(ln or '')) for ln in (best.get('lines') or []))
+        if not already and (best_image is not None):
+            # Build quick lookup of words by line_id
+            words = best.get('words') or []
+            words_by_lid: Dict[tuple, List[Dict[str, Any]]] = {}
+            for wdict in words:
+                lid = tuple(wdict.get('line_id') or ())
+                if lid:
+                    words_by_lid.setdefault(lid, []).append(wdict)
+            lids = best.get('line_ids') or []
+            lines = best.get('lines') or []
+            H, W = (best_image.shape[:2] if best_image.ndim == 3 else best_image.shape)
+            # ensure grayscale ROI base
+            if best_image.ndim == 3:
+                roi_base = cv2.cvtColor(best_image, cv2.COLOR_BGR2GRAY)
+            else:
+                roi_base = best_image.copy()
+            KEY_UP = ("DEBIT", "CREDIT", "PURCHASE", "US DEBIT", "US CREDIT", "CARD")
+
+            def _crop_safe(x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
+                x1 = max(0, min(W-1, int(x1)))
+                y1 = max(0, min(H-1, int(y1)))
+                x2 = max(0, min(W, int(x2)))
+                y2 = max(0, min(H, int(y2)))
+                if x2 <= x1 or y2 <= y1:
+                    return roi_base[0:0, 0:0]
+                return roi_base[y1:y2, x1:x2]
+
+            def _run_pan_ocr(img_single: np.ndarray) -> List[str]:
+                if img_single.size == 0:
+                    return []
+                vars: List[np.ndarray] = []
+                vars.append(img_single)
+                try:
+                    vars.append(cv2.bitwise_not(img_single))
+                except Exception:
+                    pass
+                try:
+                    block = int(OCR_ADAPTIVE_BLOCK)
+                    if block % 2 == 0:
+                        block += 1
+                    cval = int(OCR_ADAPTIVE_C)
+                    th = cv2.adaptiveThreshold(img_single, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, block, cval)
+                    vars.append(th)
+                except Exception:
+                    pass
+                wl = "*Xx#0123456789/- "
+                oem = OCR_OEM
+                dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+                spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+                dpi_flag = f"--dpi {OCR_USER_DPI}"
+                psms = [7, 6, 11]
+                out_lines: List[str] = []
+                for v in vars:
+                    pil = Image.fromarray(v)
+                    for psm in psms:
+                        try:
+                            cfg_str = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={wl}"
+                            data = pytesseract.image_to_data(pil, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=cfg_str)
+                            n = len(data.get('text', []))
+                            toks: List[str] = []
+                            for i in range(n):
+                                t = (data['text'][i] or '').strip()
+                                if t:
+                                    toks.append(t)
+                            if toks:
+                                out_lines.append(" ".join(toks))
+                        except Exception:
+                            continue
+                # Keep only masked candidates
+                return [s for s in out_lines if MASKED_RE.search(str(s))]
+
+            found: List[str] = []
+            last_roiB = None  # track for digits-only fallback
+            for i, lid in enumerate(lids):
+                s = (lines[i] or "") if i < len(lines) else ""
+                up = s.upper()
+                if not any(k in up for k in KEY_UP):
+                    continue
+                wlist = words_by_lid.get(tuple(lid), [])
+                if not wlist:
+                    continue
+                x1 = min(w['left'] for w in wlist)
+                y1 = min(w['top'] for w in wlist)
+                x2 = max(w['left'] + w['width'] for w in wlist)
+                y2 = max(w['top'] + w['height'] for w in wlist)
+                h = max(6, y2 - y1)
+                # ROI A: to the right of the keyword line
+                roiA = _crop_safe(x2 + 4, y1 - int(0.4*h), min(W, x2 + int(0.55*W)), y2 + int(0.6*h))
+                found += _run_pan_ocr(roiA)
+                # ROI B: next line below, full right half
+                roiB = _crop_safe(int(W*0.35), y2 + 2, W, min(H, y2 + int(2.2*h)))
+                last_roiB = roiB
+                found += _run_pan_ocr(roiB)
+            # Merge into best if any new masked lines detected
+            if not found:
+                # Secondary: digits-only sweep in same ROIs to recover last4 even when mask glyphs fail
+                def _digits_only(img_single: np.ndarray) -> str:
+                    if img_single.size == 0:
+                        return ""
+                    wl = "0123456789"
+                    oem = OCR_OEM
+                    dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+                    spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+                    dpi_flag = f"--dpi {OCR_USER_DPI}"
+                    psms = [7, 6, 11]
+                    vars: List[np.ndarray] = [img_single]
+                    try:
+                        vars.append(cv2.bitwise_not(img_single))
+                    except Exception:
+                        pass
+                    try:
+                        block = int(OCR_ADAPTIVE_BLOCK)
+                        if block % 2 == 0:
+                            block += 1
+                        cval = int(OCR_ADAPTIVE_C)
+                        th = cv2.adaptiveThreshold(img_single, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, block, cval)
+                        vars.append(th)
+                    except Exception:
+                        pass
+                    best_seq = ""
+                    import re as _re2
+                    re4 = _re2.compile(r"\d{4,}")
+                    for v in vars:
+                        pil = Image.fromarray(v)
+                        for psm in psms:
+                            try:
+                                cfg_str = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={wl}"
+                                data = pytesseract.image_to_data(pil, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=cfg_str)
+                                toks = [(data['text'][k] or '').strip() for k in range(len(data.get('text', []))) if (data['text'][k] or '').strip()]
+                                s = "".join(toks)
+                                m = re4.search(s)
+                                if m:
+                                    seq = m.group(0)
+                                    if len(seq) >= 4:
+                                        best_seq = seq[-4:]
+                                        return best_seq
+                            except Exception:
+                                continue
+                    return best_seq
+                # try digits-only around the first matched keyword ROI we computed last
+                # reuse last roiB if available; otherwise attempt the lower-right quadrant near payment area
+                candidate = _digits_only(last_roiB) if last_roiB is not None else ""
+                if candidate and len(candidate) == 4:
+                    found.append(f"**** {candidate}")
+
+            if found:
+                base_lines = best['lines']
+                merged = list(base_lines)
+                for ln in found:
+                    s = str(ln or '').strip()
+                    if s and not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                        merged.append(s)
+                best['lines'] = merged
+                best['text'] = "\n".join(merged)
+    except Exception as e:
+        if DEBUG:
+            logger.debug("ROI PAN search failed: %s", e)
 
     # Attach the image used for downstream overlay
     best['proc_image'] = best_image if best_image is not None else gray

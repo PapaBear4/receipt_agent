@@ -108,6 +108,19 @@ def find_payee(client: LlmClient, lines: List[str]) -> Tuple[ExtractResult, Dict
     try:
         chosen = lines[pr.index] if 0 <= pr.index < len(lines) else ""
         up = (chosen or "").strip().upper()
+        # New: if this line looks like a pure money/amount line, override to a better candidate
+        import re as _re
+        if filters.MONEY_RE.search(chosen or "") or ("$" in chosen):
+            for j in cand:
+                if 0 <= j < len(lines):
+                    s2 = lines[j]
+                    if not (filters.MONEY_RE.search(s2 or "") or ("$" in (s2 or ""))):
+                        dbg["override_amount"] = {"from": pr.index, "to": j}
+                        pr.index = j
+                        pr.confidence = max(pr.confidence, 0.85)
+                        chosen = lines[pr.index]
+                        up = (chosen or "").strip().upper()
+                        break
         bad = looks_slogan(up) or looks_staff(up) or looks_address(up) or digit_heavy(up)
         if bad:
             # find best alternative among candidates by brandiness

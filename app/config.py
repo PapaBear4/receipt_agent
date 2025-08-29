@@ -131,7 +131,7 @@ class Settings:
     # Preserve spaces: improves layout fidelity in outputs
     OCR_PRESERVE_SPACES: bool = os.getenv("OCR_PRESERVE_SPACES", "true").lower() in {"1", "true", "yes"}
     # DPI hint for Tesseract; camera images benefit from a higher user-defined DPI
-    OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "100"))
+    OCR_USER_DPI: int = int(os.getenv("OCR_USER_DPI", "300"))
     # Selection scoring weight: favor OCR variants that yield more distinct lines
     # Score = words + (OCR_SCORE_LINES_WEIGHT * lines). Increase to penalize merged lines.
     OCR_SCORE_LINES_WEIGHT: float = float(os.getenv("OCR_SCORE_LINES_WEIGHT", "0.8"))

@@ -55,6 +55,9 @@ def top_k_payee(lines: List[str], k: int = 5) -> List[int]:
     for i, s in enumerate(lines[:40]):
         up = s.strip().upper()
         score = 0.0
+        # Strongly downrank amount/price-only lines
+        if MONEY_RE.search(s) or any(sym in s for sym in ("$", "€", "£")):
+            score -= 1.2
         if len(up) >= 3 and not up.startswith("HTTP"):
             score += 0.3
         if any(h in up for h in KEYS_PAYEE_HINT):

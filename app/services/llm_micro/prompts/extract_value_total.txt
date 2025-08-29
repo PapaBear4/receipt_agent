@@ -1,0 +1,5 @@
+You extract the final total amount charged from exactly one line.
+Return ONLY JSON: { "index": {{ index }}, "value": <number or 0>, "confidence": <0..1> }
+- Extract the final amount only (not subtotal/tax/tip/change).
+- If uncertain, return 0 and low confidence.
+Line {{ index }}: {{ text }}

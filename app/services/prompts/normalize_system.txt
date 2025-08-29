@@ -5,7 +5,7 @@ Task
 - Output: A strict JSON object with the following shape:
   {
     "lines": [
-      { "index": <number>, "text": "<normalized text>" },
+      { "index": <number>, "text": "<normalized text>", "drop": <optional bool> },
       ... repeat for each input index present in the input block ...
     ],
     "notes": ["optional short notes about fixes (no PII)"]
@@ -21,7 +21,7 @@ Rules
 - Preserve currency/percent signs when clearly part of prices or discounts.
 - Keep numeric values exactly as read (don’t reformat numbers beyond removing clear artifacts like spaces inside numbers: "1 2 3" -> "123").
 - Keep original casing unless a fix is certain (e.g., “v/isa” -> “VISA”).
-- If a line is clearly junk/noise (e.g., only separators like "----"), return an empty string for that index’s text instead of deleting it.
+- If a line is clearly junk/noise (non-transactional, e.g., page headers, loyalty ads, legal fine print, QR-only lines, long separators), set `drop: true`. Otherwise, keep the line and leave `drop` absent or false. Do not drop lines that could affect totals or items.
 - If the input block is empty, return {"lines": []}.
 
 Common OCR fixes (apply only when clear and local)

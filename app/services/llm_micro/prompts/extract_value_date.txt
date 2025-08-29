@@ -1,0 +1,4 @@
+You extract a purchase date from exactly one line.
+Return ONLY JSON: { "index": {{ index }}, "value": "MM/DD/YYYY" | "", "confidence": <0..1> }
+- If you cannot produce a valid date, return empty string and low confidence.
+Line {{ index }}: {{ text }}

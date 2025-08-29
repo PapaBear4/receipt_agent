@@ -113,10 +113,57 @@
     <details style="margin-top:0.75rem;">
       <summary style="cursor:pointer; color:#0366d6;">Show raw LLM inputs/outputs</summary>
       <div style="display:grid; grid-template-columns: 1fr; gap:1rem; margin-top:0.75rem;">
+        {% if llm_debug and (llm_debug.lines_block_original or llm_debug.lines_block) %}
+        <div class="card" style="background:#f6fbff;">
+          <h4 style="margin:0 0 0.5rem 0;">Indexed OCR lines used as input</h4>
+          {% if llm_debug.lines_block_original %}
+          <details>
+            <summary>Original (pre-normalize)</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ llm_debug.lines_block_original | e }}</pre>
+          </details>
+          {% endif %}
+          {% if llm_debug.lines_block %}
+          <details open>
+            <summary>After normalize</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ llm_debug.lines_block | e }}</pre>
+          </details>
+          {% endif %}
+        </div>
+        {% endif %}
+        {% set normalize_dbg = llm_debug.normalize if llm_debug and llm_debug.normalize else None %}
+        {% if normalize_dbg %}
+        <div class="card" style="background:#fafafa;">
+          <h4 style="margin:0 0 0.5rem 0;">Normalize call</h4>
+          {% if normalize_dbg.stats %}
+          <div class="key-hint" style="margin-bottom:0.5rem;">
+            tokens: prompt {{ normalize_dbg.stats.prompt_tokens or 'n/a' }}, completion {{ normalize_dbg.stats.completion_tokens or 'n/a' }} ·
+            time: wall {{ '%.3f'|format(normalize_dbg.stats.wall_sec) if normalize_dbg.stats.wall_sec is not none else 'n/a' }}s,
+            total {{ '%.3f'|format(normalize_dbg.stats.total_sec) if normalize_dbg.stats.total_sec is not none else 'n/a' }}s,
+            eval {{ '%.3f'|format(normalize_dbg.stats.eval_sec) if normalize_dbg.stats.eval_sec is not none else 'n/a' }}s
+          </div>
+          {% endif %}
+          <details open>
+            <summary>Prompt</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ normalize_dbg.prompt_full | e }}</pre>
+          </details>
+          <details>
+            <summary>Raw response</summary>
+            <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ normalize_dbg.response_raw | e }}</pre>
+          </details>
+        </div>
+        {% endif %}
         {% set meta_dbg = llm_debug.meta if llm_debug and llm_debug.meta else None %}
         {% if meta_dbg %}
         <div class="card" style="background:#fafafa;">
           <h4 style="margin:0 0 0.5rem 0;">Meta call</h4>
+          {% if meta_dbg.stats %}
+          <div class="key-hint" style="margin-bottom:0.5rem;">
+            tokens: prompt {{ meta_dbg.stats.prompt_tokens or 'n/a' }}, completion {{ meta_dbg.stats.completion_tokens or 'n/a' }} ·
+            time: wall {{ '%.3f'|format(meta_dbg.stats.wall_sec) if meta_dbg.stats.wall_sec is not none else 'n/a' }}s,
+            total {{ '%.3f'|format(meta_dbg.stats.total_sec) if meta_dbg.stats.total_sec is not none else 'n/a' }}s,
+            eval {{ '%.3f'|format(meta_dbg.stats.eval_sec) if meta_dbg.stats.eval_sec is not none else 'n/a' }}s
+          </div>
+          {% endif %}
           <details open>
             <summary>Prompt</summary>
             <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ meta_dbg.prompt_full | e }}</pre>
@@ -125,12 +172,66 @@
             <summary>Raw response</summary>
             <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ meta_dbg.response_raw | e }}</pre>
           </details>
+          {% if meta_dbg.micro %}
+          <details open>
+            <summary>Micro‑experts (per field)</summary>
+            {% for field in ['date','total','payee','last4'] %}
+              {% set m = meta_dbg.micro[field] if meta_dbg.micro and meta_dbg.micro[field] else None %}
+              {% if m %}
+              <div class="card" style="background:#fff; margin:0.5rem 0; padding:0.75rem;">
+                <h5 style="margin:0 0 0.25rem 0; text-transform:uppercase; letter-spacing:0.02em;">{{ field }}</h5>
+                {% set pk = m.pick if m.pick else None %}
+                {% set ex = m.extract if m.extract else None %}
+                {% if pk or ex %}
+                <div class="key-hint" style="margin-bottom:0.25rem;">
+                  {% if pk %}[pick] tokens: p {{ pk.prompt_eval_count or 'n/a' }}, c {{ pk.eval_count or 'n/a' }} · time: wall {{ '%.3f'|format(pk._client_wall_sec) if pk._client_wall_sec is not none else 'n/a' }}s{% endif %}
+                  {% if pk and ex %} · {% endif %}
+                  {% if ex %}[extract] tokens: p {{ ex.prompt_eval_count or 'n/a' }}, c {{ ex.eval_count or 'n/a' }} · time: wall {{ '%.3f'|format(ex._client_wall_sec) if ex._client_wall_sec is not none else 'n/a' }}s{% endif %}
+                </div>
+                {% endif %}
+                {% if m.p1 %}
+                <details>
+                  <summary>[pick] Prompt</summary>
+                  <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ m.p1 | e }}</pre>
+                </details>
+                {% endif %}
+                {% if m.r1 %}
+                <details>
+                  <summary>[pick] Raw response</summary>
+                  <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ m.r1 | e }}</pre>
+                </details>
+                {% endif %}
+                {% if m.p2 %}
+                <details>
+                  <summary>[extract] Prompt</summary>
+                  <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ m.p2 | e }}</pre>
+                </details>
+                {% endif %}
+                {% if m.r2 %}
+                <details>
+                  <summary>[extract] Raw response</summary>
+                  <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ m.r2 | e }}</pre>
+                </details>
+                {% endif %}
+              </div>
+              {% endif %}
+            {% endfor %}
+          </details>
+          {% endif %}
         </div>
         {% endif %}
         {% set items_dbg = llm_debug.items if llm_debug and llm_debug.items else None %}
         {% if items_dbg %}
         <div class="card" style="background:#fafafa;">
           <h4 style="margin:0 0 0.5rem 0;">Items call</h4>
+          {% if items_dbg.stats %}
+          <div class="key-hint" style="margin-bottom:0.5rem;">
+            tokens: prompt {{ items_dbg.stats.prompt_tokens or 'n/a' }}, completion {{ items_dbg.stats.completion_tokens or 'n/a' }} ·
+            time: wall {{ '%.3f'|format(items_dbg.stats.wall_sec) if items_dbg.stats.wall_sec is not none else 'n/a' }}s,
+            total {{ '%.3f'|format(items_dbg.stats.total_sec) if items_dbg.stats.total_sec is not none else 'n/a' }}s,
+            eval {{ '%.3f'|format(items_dbg.stats.eval_sec) if items_dbg.stats.eval_sec is not none else 'n/a' }}s
+          </div>
+          {% endif %}
           <details open>
             <summary>Prompt</summary>
             <pre style="white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:0.5rem; overflow:auto; max-height:240px;">{{ items_dbg.prompt_full | e }}</pre>

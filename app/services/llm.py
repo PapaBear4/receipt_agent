@@ -6,6 +6,9 @@ import logging
 from pathlib import Path
 
 from app.config import settings
+from app.services.llm_micro.client import LlmClient as MicroLlmClient
+from app.services.llm_micro import micro_experts as micro
+from app.services.llm_micro.filters import LAST4_RE, KEYS_CARD
 
 from pydantic import BaseModel, Field, ValidationError
 from app.services.enrichment import get_enricher
@@ -83,6 +86,15 @@ def _parse_json_object(text: str) -> dict:
     except Exception:
         return {}
 
+# Safe convert nanoseconds to seconds
+def _ns_to_sec(ns: Any) -> Optional[float]:
+    try:
+        if ns is None:
+            return None
+        return float(ns) / 1e9
+    except Exception:
+        return None
+
 # Basic cleanup of OCR lines to drop noise.
 def _filter_useful_lines(lines: Optional[List[str]]) -> List[str]:
     def _looks_useful(line: str) -> bool:
@@ -133,6 +145,7 @@ class NormalizeExpert(BaseExpert):
 
         Expects a JSON like {"lines":[{"index":0,"text":"..."}, ...]} and updates ctx.ocr_lines in-place.
         """
+        force_kept: List[int] = []
         try:
             tmpl = _read_prompt("normalize_system.txt")
         except Exception as e:
@@ -150,7 +163,8 @@ class NormalizeExpert(BaseExpert):
         obj = _parse_json_object(text)
 
         # Build a mapping of index -> text from response
-        mapping = {}
+        mapping: Dict[int, str] = {}
+        drops: set[int] = set()
         if isinstance(obj, dict):
             raw = obj.get("lines") or []
             if isinstance(raw, list):
@@ -161,16 +175,44 @@ class NormalizeExpert(BaseExpert):
                         idx = int(it.get("index", -1) or -1)
                         val = str(it.get("text", "") or "")
                         mapping[idx] = val
+                        if bool(it.get("drop")):
+                            drops.add(idx)
                     except Exception:
                         continue
 
         # Apply mapping to current ctx.ocr_lines, preserving length/order
         try:
+            def _looks_junk(s: str) -> bool:
+                t = (s or "").strip()
+                if not t:
+                    return True
+                # lines that are just separators or mostly punctuation
+                if all(ch in "-_=*~•· ." for ch in t) and len(t) >= 3:
+                    return True
+                # very short tokens without digits/letters (noise)
+                if len(t) <= 2 and not any(c.isalnum() for c in t):
+                    return True
+                return False
+
             normalized = list(ctx.ocr_lines)
             for k, v in mapping.items():
                 if 0 <= k < len(normalized):
                     normalized[k] = v
-            ctx.ocr_lines = normalized
+            # Drop indices explicitly flagged or clearly junk after normalization
+            kept: List[str] = []
+            for i, s in enumerate(normalized):
+                # Protect card lines (masked PAN with last4, or card brand keywords)
+                si = s or ""
+                up = si.upper()
+                looks_card = bool(LAST4_RE.search(up)) or any(k in up for k in KEYS_CARD)
+                if i in drops and not looks_card:
+                    continue
+                if _looks_junk(si) and not looks_card:
+                    continue
+                if looks_card:
+                    force_kept.append(i)
+                kept.append(s)
+            ctx.ocr_lines = kept
         except Exception:
             # Keep original lines on any failure
             ctx.warnings.append("normalize-apply-failed")
@@ -184,9 +226,15 @@ class NormalizeExpert(BaseExpert):
                 "response_raw": text,
                 "response_json": obj,
                 "output_lines": list(ctx.ocr_lines),
+                "dropped_indices": sorted(list(drops)) if drops else [],
+                "force_kept_indices": sorted(force_kept) if force_kept else [],
                 "stats": {
                     "prompt_tokens": data.get("prompt_eval_count"),
                     "completion_tokens": data.get("eval_count"),
+                    "wall_sec": data.get("_client_wall_sec"),
+                    "total_sec": _ns_to_sec(data.get("total_duration")),
+                    "prompt_eval_sec": _ns_to_sec(data.get("prompt_eval_duration")),
+                    "eval_sec": _ns_to_sec(data.get("eval_duration")),
                 },
             })
         except Exception:
@@ -199,31 +247,110 @@ class MetaExpert(BaseExpert):
     name = "meta"
 
     def run(self, client: LlmClient, ctx: PipelineContext, lines_block: str) -> Tuple[PipelineContext, dict]:
-        meta_tmpl = _read_prompt("meta_system.txt")
-        prompt = f"{meta_tmpl}\n\n{lines_block}\n"
-        text, data = client.generate_json(prompt)
-        obj = _parse_json_object(text)
+        # Use micro-experts to extract fields individually
+        mclient = MicroLlmClient()
+        # Always use normalized OCR lines directly to avoid header artifacts
+        lines = list(ctx.ocr_lines)
+
+        dbg: Dict[str, Any] = {}
+        # date
+        er_date, d_date = micro.find_date(mclient, lines)
+        ctx.meta.date = str(er_date.value or "")
+        dbg["date"] = d_date
+        # total
+        er_total, d_total = micro.find_total(mclient, lines)
         try:
-            ctx.meta = Meta.model_validate(obj)
-        except ValidationError:
-            # Keep defaults on failure
-            ctx.warnings.append("meta-validate-failed")
-        # Capture debug info including any non-modeled fields like 'sources'
+            ctx.meta.total = float(er_total.value) if er_total.value not in ("", None) else 0.0
+        except Exception:
+            ctx.meta.total = 0.0
+        dbg["total"] = d_total
+        # payee
+        er_payee, d_payee = micro.find_payee(mclient, lines)
+        ctx.meta.payee = str(er_payee.value or "")
+        dbg["payee"] = d_payee
+        # last4
+        er_last4, d_last4 = micro.find_last4(mclient, lines)
+        ctx.meta.payment.last4 = str(er_last4.value or "")
+        dbg["last4"] = d_last4
+
+        # Aggregate timing/token metrics across micro calls if available
+        def _sum_key(obj_list: List[dict], key: str) -> float:
+            s: float = 0.0
+            for o in obj_list:
+                try:
+                    v = o.get(key)
+                    if v is None:
+                        continue
+                    s += float(v)
+                except Exception:
+                    continue
+            return s
+
+        def _collect(d: Dict[str, Any]) -> List[dict]:
+            return [d.get("pick") or {}, d.get("extract") or {}]
+
+        all_calls: List[dict] = []
+        for k in ("date", "total", "payee", "last4"):
+            all_calls += _collect(dbg.get(k) or {})
+        data = {
+            "prompt_eval_count": _sum_key(all_calls, "prompt_eval_count"),
+            "eval_count": _sum_key(all_calls, "eval_count"),
+            "total_duration": _sum_key(all_calls, "total_duration"),
+            "prompt_eval_duration": _sum_key(all_calls, "prompt_eval_duration"),
+            "eval_duration": _sum_key(all_calls, "eval_duration"),
+            "_client_wall_sec": _sum_key(all_calls, "_client_wall_sec"),
+        }
+
+        # Attach debug
+        ctx.debug.setdefault("meta", {})
+        # For compatibility with the review UI, expose a synthetic prompt/response pointing to micro-expert traces
+        micro_prompts: List[str] = []
+        micro_raws: List[str] = []
         try:
-            ctx.debug.setdefault("meta", {})
-            ctx.debug["meta"].update({
-                "prompt_full": prompt,
-                "prompt": meta_tmpl,
-                "response_raw": text,
-                "response_json": obj,
-                "sources": obj.get("sources") if isinstance(obj, dict) else None,
-                "stats": {
-                    "prompt_tokens": data.get("prompt_eval_count"),
-                    "completion_tokens": data.get("eval_count"),
-                },
-            })
+            for k in ("date", "total", "payee", "last4"):
+                d = dbg.get(k) or {}
+                p1 = d.get("p1")
+                p2 = d.get("p2")
+                r1 = d.get("r1")
+                r2 = d.get("r2")
+                if p1:
+                    micro_prompts.append(f"[{k}] PICK\n" + str(p1))
+                if p2:
+                    micro_prompts.append(f"[{k}] EXTRACT\n" + str(p2))
+                if r1:
+                    micro_raws.append(f"[{k}] PICK\n" + str(r1))
+                if r2:
+                    micro_raws.append(f"[{k}] EXTRACT\n" + str(r2))
         except Exception:
             pass
+        # Build field sources for UI (line index + confidence from extract phase)
+        sources = {
+            "date": {"line_index": getattr(er_date, "index", -1), "confidence": getattr(er_date, "confidence", 0.0)},
+            "payee": {"line_index": getattr(er_payee, "index", -1), "confidence": getattr(er_payee, "confidence", 0.0)},
+            "total": {"line_index": getattr(er_total, "index", -1), "confidence": getattr(er_total, "confidence", 0.0)},
+            "payment": {"last4": {"line_index": getattr(er_last4, "index", -1), "confidence": getattr(er_last4, "confidence", 0.0)}},
+        }
+        ctx.debug["meta"].update({
+            "micro": dbg,
+            "prompt": "\n\n".join(micro_prompts) if micro_prompts else None,
+            "prompt_full": "\n\n".join(micro_prompts) if micro_prompts else None,
+            "response_raw": "\n\n".join(micro_raws) if micro_raws else None,
+            "response_json": {
+                "date": ctx.meta.date,
+                "payee": ctx.meta.payee,
+                "total": ctx.meta.total,
+                "payment": {"last4": ctx.meta.payment.last4},
+            },
+            "sources": sources,
+            "stats": {
+                "prompt_tokens": data.get("prompt_eval_count"),
+                "completion_tokens": data.get("eval_count"),
+                "wall_sec": data.get("_client_wall_sec"),
+                "total_sec": _ns_to_sec(data.get("total_duration")),
+                "prompt_eval_sec": _ns_to_sec(data.get("prompt_eval_duration")),
+                "eval_sec": _ns_to_sec(data.get("eval_duration")),
+            },
+        })
         return ctx, data
 
 
@@ -296,6 +423,10 @@ class ItemsExpert(BaseExpert):
                 "stats": {
                     "prompt_tokens": data.get("prompt_eval_count"),
                     "completion_tokens": data.get("eval_count"),
+                    "wall_sec": data.get("_client_wall_sec"),
+                    "total_sec": _ns_to_sec(data.get("total_duration")),
+                    "prompt_eval_sec": _ns_to_sec(data.get("prompt_eval_duration")),
+                    "eval_sec": _ns_to_sec(data.get("eval_duration")),
                 },
             })
         except Exception:
@@ -472,17 +603,15 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
             + max(gi(d2, "_client_wall_sec") or 0.0, 0.0)
         )
 
-        # Prompt sizes from captured full prompts
+        # Prompt sizes from captured full prompts (meta now uses micro-experts; no single prompt)
         norm_pf = str(((ctx.debug.get("normalize") or {}).get("prompt_full") or ""))
-        meta_pf = str(((ctx.debug.get("meta") or {}).get("prompt_full") or ""))
         items_pf = str(((ctx.debug.get("items") or {}).get("prompt_full") or ""))
-        prompt_chars = (len(norm_pf) + len(meta_pf) + len(items_pf)) if (norm_pf or meta_pf or items_pf) else None
+        prompt_chars = (len(norm_pf) + len(items_pf)) if (norm_pf or items_pf) else None
         prompt_lines = None
         try:
             pl0 = norm_pf.count("\n") + (1 if norm_pf else 0)
-            pl1 = meta_pf.count("\n") + (1 if meta_pf else 0)
             pl2 = items_pf.count("\n") + (1 if items_pf else 0)
-            prompt_lines = pl0 + pl1 + pl2 if (pl0 or pl1 or pl2) else None
+            prompt_lines = pl0 + pl2 if (pl0 or pl2) else None
         except Exception:
             prompt_lines = None
 
@@ -490,12 +619,14 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
         tps_completion = (float(completion_tokens) / float(eval_sec)) if eval_sec and eval_sec > 0 else None
         tps_end_to_end = (float(completion_tokens) / float(wall_sec)) if wall_sec and wall_sec > 0 else None
 
+        # counts after normalization
+        post_lines_count = len(ctx.ocr_lines)
         metrics = {
             "prompt": {
                 "chars": prompt_chars,
                 "lines": prompt_lines,
                 "include_full_text": False,
-                "long_input": bool(max_lines and len(ocr_lines_clean) >= max_lines),
+                "long_input": bool(max_lines and post_lines_count >= max_lines),
                 "indexed_lines": included_lines_count,
                 "max_lines": max_lines,
                 "max_chars": 0,
@@ -506,6 +637,8 @@ def extract_fields_from_text(ocr_text: str, ocr_lines: Optional[List[str]] = Non
                     "cleaned_lines": len(cleaned_text_lines_list),
                     "provided_lines": len(ocr_lines or []),
                     "provided_lines_cleaned": len(ocr_lines_clean),
+                    "post_normalize_lines": post_lines_count,
+                    "dropped_lines": max(0, len(ocr_lines_clean) - post_lines_count),
                     "full_text_sent_chars": 0,
                 },
             },

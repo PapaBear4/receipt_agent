@@ -1,0 +1,5 @@
+You extract the merchant/store name (payee) from exactly one line.
+Return ONLY JSON: { "index": {{ index }}, "value": "<payee or empty>", "confidence": <0..1> }
+- Keep it concise (brand/store name), no address/URL/phone.
+- If uncertain, return empty string and low confidence.
+Line {{ index }}: {{ text }}

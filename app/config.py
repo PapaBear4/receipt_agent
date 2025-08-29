@@ -153,6 +153,11 @@ class Settings:
     # Minimum band height (rows) to keep
     OCR_FULLWIDTH_MIN_HEIGHT: int = int(os.getenv("OCR_FULLWIDTH_MIN_HEIGHT", "8"))
 
+    # Fallback: extra OCR pass focused on masked PAN/last4 (e.g., **** 1234, XXXX 1234)
+    # Runs an additional quick pass with a strict whitelist "*Xx#0123456789/- " to help capture masked card lines
+    # that Tesseract sometimes drops in general passes.
+    OCR_PAN_FALLBACK: bool = os.getenv("OCR_PAN_FALLBACK", "true").lower() in {"1", "true", "yes"}
+
     # Post-OCR line clustering and ordering (env overridable)
     # Merge words into visual lines by Y and sort lines top-to-bottom, then words left-to-right.
     # y tolerance = max(OCR_Y_CLUSTER_MIN_PX, median_word_height * OCR_Y_CLUSTER_TOL_FRAC)

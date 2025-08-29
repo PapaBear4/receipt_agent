@@ -34,8 +34,15 @@ Rules:
 - Identify merchant/store name (payee).
 - Parse purchase date (prefer MM/DD/YYYY; best-effort otherwise).
 - Determine final total charged; fill payment breakouts if present.
+- The amount charged for tax will be a dollar value.
+- If the receipt indicated the tax percentage ignore the percentage, only return the amount of tax charged.
 - Infer payment method and card last4 if present.
-- Card last4 will be a 4 digit number below the total charged, often near the payment method.
+- Card last4 must be exactly 4 digits (0-9). If no 4-digit token exists, set last4 to an empty string "".
+- Prefer digits found near keywords like: Credit, Debit, Card, Account, ACCT, VISA, MC/MASTERCARD, AMEX, DISCOVER. Ignore IDs unrelated to payment (Store/Terminal/Order/Txn/Invoice/Auth).
+- If the line shows masking (e.g., "**** 1234" or "XXXX-XXXX-XXXX-1234"), extract only the trailing 4 digits ("1234"). Do not include asterisks, Xs, spaces, or hyphens.
+- Do NOT guess or default last4 to placeholders (e.g., not "0000" or "1234"). If uncertain or conflicting, return "" and lower the confidence.
+- Never derive last4 from dates, times, amounts, SKUs, or other numeric fields.
+- Validation requirement: before returning, if payment.last4 does not match the regex ^\\d{4}$, set it to "".
 - For each header value you extract (date, payee, total, and payment fields), include a source object with:
   - line_index: the OCR LINES index you used (or -1 if unknown/derived), and
   - confidence: a float 0.0–1.0 indicating how confident you are in that specific extraction from that line.

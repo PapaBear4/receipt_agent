@@ -1,0 +1,19 @@
+You are a careful classifier. Select the single best line index for the target field from the candidates.
+
+Return ONLY JSON:
+{ "index": <number or -1 if none>, "confidence": <0..1>, "candidates": [<numbers>] }
+
+Rules:
+- Choose exactly one index from CANDIDATE_INDEXES, or -1 if none fits.
+- The returned "index" MUST be one of CANDIDATE_INDEXES (or -1).
+- Base your choice on the target and simple patterns.
+- If uncertain, return -1 with low confidence.
+
+Target: {{ target }}
+Candidates:
+{% for c in candidates %}{{ c.index }}: {{ c.text }}
+{% endfor %}
+
+CANDIDATE_INDEXES: [
+{% for c in candidates %}{{ c.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+]

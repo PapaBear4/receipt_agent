@@ -217,6 +217,48 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
                     best = res
                     best_score = score
         result = best if best is not None else run_raw(rgb, 6)
+        # PAN fallback in raw-only path
+        try:
+            if bool(getattr(settings, 'OCR_PAN_FALLBACK', True)):
+                pan_img = gray  # prefer grayscale for stability
+                pan_whitelist = "*Xx#0123456789/- "
+                oem = OCR_OEM
+                dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+                spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+                dpi_flag = f"--dpi {OCR_USER_DPI}"
+                pan_psms = [7, 6, 11]
+                pan_words: List[Dict[str, Any]] = []
+                for psm in pan_psms:
+                    try:
+                        pan_config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
+                        pil_img = Image.fromarray(pan_img)
+                        data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=pan_config)
+                        n = len(data.get('text', []))
+                        for i in range(n):
+                            txt = (data['text'][i] or '').strip()
+                            if not txt:
+                                continue
+                            left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+                            pan_words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': (1,1,1)})
+                    except Exception:
+                        continue
+                if pan_words:
+                    grouped_pan = _cluster_lines_by_y(pan_words)
+                    pan_lines: List[str] = grouped_pan['lines']
+                    base_lines = result['lines'] if result else []
+                    merged = list(base_lines)
+                    for ln in pan_lines:
+                        s = str(ln or '').strip()
+                        if not s:
+                            continue
+                        if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                            merged.append(s)
+                    if result is not None:
+                        result['lines'] = merged
+                        result['text'] = "\n".join(merged)
+        except Exception as e:
+            if DEBUG:
+                logger.debug("RAW-only PAN fallback failed: %s", e)
         if DEBUG and debug_basename:
             try:
                 out = settings.PROCESSED_DIR / f"ocr_input_used_{debug_basename}.png"
@@ -461,6 +503,56 @@ def ocr_on_cropped_image(img_bgr: np.ndarray, debug_basename: Optional[str] = No
         h, w = gray.shape
         best = {'text': '', 'lines': [], 'words': [], 'line_ids': [], 'size': (w, h)}
         best_image = gray
+
+    # Optional: masked PAN fallback pass to capture lines like "**** 1234"
+    try:
+        if bool(getattr(settings, 'OCR_PAN_FALLBACK', True)):
+            pan_img = gray  # use grayscale variant for stability
+            # Build a strict whitelist focused on masked PAN tokens
+            pan_whitelist = "*Xx#0123456789/- "
+            oem = OCR_OEM
+            dict_flag = "-c load_system_dawg=0 load_freq_dawg=0" if OCR_DISABLE_DICTIONARY else ""
+            spaces_flag = "-c preserve_interword_spaces=1" if OCR_PRESERVE_SPACES else ""
+            dpi_flag = f"--dpi {OCR_USER_DPI}"
+            # Try PSMs that treat short text lines well
+            pan_psms = [7, 6, 11]
+            pan_words: List[Dict[str, Any]] = []
+            for psm in pan_psms:
+                try:
+                    pan_config = f"--oem {oem} --psm {psm} {dpi_flag} {spaces_flag} {dict_flag} -c tessedit_char_whitelist={pan_whitelist}"
+                    pil_img = Image.fromarray(pan_img)
+                    data = pytesseract.image_to_data(pil_img, lang=TESSERACT_LANG, output_type=pytesseract.Output.DICT, config=pan_config)
+                    n = len(data.get('text', []))
+                    for i in range(n):
+                        txt = (data['text'][i] or '').strip()
+                        if not txt:
+                            continue
+                        # keep low confidence too; masked lines can be faint
+                        left, top, width, height = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+                        pan_words.append({'text': txt, 'left': int(left), 'top': int(top), 'width': int(width), 'height': int(height), 'line_id': (1,1,1)})
+                except Exception as e:
+                    if DEBUG:
+                        logger.debug("PAN fallback PSM %s failed: %s", psm, e)
+                    continue
+            if pan_words:
+                grouped_pan = _cluster_lines_by_y(pan_words)
+                pan_lines: List[str] = grouped_pan['lines']
+                # Merge new lines that are not already in best lines
+                base_lines = best['lines'] if best else []
+                merged = list(base_lines)
+                for ln in pan_lines:
+                    s = str(ln or '').strip()
+                    if not s:
+                        continue
+                    # Deduplicate by simple containment; keep if not present in any existing line
+                    if not any(s in (bl or '') or (bl or '') in s for bl in base_lines):
+                        merged.append(s)
+                if best is not None:
+                    best['lines'] = merged
+                    best['text'] = "\n".join(merged)
+    except Exception as e:
+        if DEBUG:
+            logger.debug("PAN fallback failed: %s", e)
 
     # Attach the image used for downstream overlay
     best['proc_image'] = best_image if best_image is not None else gray

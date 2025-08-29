@@ -1,0 +1,7 @@
+You extract the last 4 digits of a payment card from exactly one line.
+Return ONLY JSON: { "index": {{ index }}, "value": "dddd" | "", "confidence": <0..1> }
+- Output must match ^\d{4}$ or be empty.
+- Prefer trailing 4 digits in masked patterns (**** 1234, XXXX-XXXX-XXXX-1234).
+- Ignore unrelated IDs (Store/Terminal/Order/Txn/Invoice/Auth).
+- If uncertain, return empty string and low confidence.
+Line {{ index }}: {{ text }}
